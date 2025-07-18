@@ -1,0 +1,36 @@
+# FILE: configs/data/vlm_pretrain.yaml
+# Bedrock Protocol: Configuration for the VLM pre-training data pipeline.
+
+# --- Dataset Specification ---
+# For this tutorial, we use a small, specific split of COCO to ensure
+# fast and reproducible execution.
+dataset_name: "HuggingFaceM4/COCO"
+# Using a specific split, e.g., Karpathy test split, is good practice.
+# For this script, we'll manually select a tiny subset for the demo.
+num_samples_to_process: 100 # Using a very small number for the demo.
+
+# --- Output & Cache Directories ---
+base_output_dir: ./data
+
+# Subdirectory for the raw downloaded dataset.
+raw_data_dir: ${base_output_dir}/raw/coco_demo
+
+# Subdirectory for the processed and cleaned dataset.
+processed_data_dir: ${base_output_dir}/processed/coco_demo
+
+# --- Data Processing Parameters ---
+# Column names in the dataset.
+image_column: image
+text_column: sentences_raw
+
+# --- Conceptual Data Distillation ---
+# Parameters for the conceptual GPT-4V data distillation.
+# In a real scenario, you would set 'enabled' to true and provide your API key.
+distillation:
+  enabled: false # Set to true to run the example.
+  # IMPORTANT: Never hardcode API keys. Use environment variables.
+  # The script will look for `OPENAI_API_KEY`.
+  max_prompts: 5 # Limit the number of API calls for this demo.
+  prompt_template: "Provide a detailed, high-quality caption for this image."
+
+# END OF FILE: configs/data/vlm_pretrain.yaml

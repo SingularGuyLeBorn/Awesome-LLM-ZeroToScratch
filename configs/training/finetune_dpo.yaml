@@ -1,0 +1,55 @@
+# FILE: configs/training/finetune_dpo.yaml
+# Bedrock Protocol: Configuration for Direct Preference Optimization (DPO).
+
+# --- Model & Tokenizer ---
+# DPO starts from a supervised fine-tuned (SFT) model.
+# This should be the path to the SFT model you trained in the previous step.
+model_name_or_path: "./checkpoints/sft-tinyllama-guanaco/final_model" # Points to the saved adapter
+use_fast_tokenizer: true
+
+# --- Dataset ---
+# DPO requires a preference dataset with 'prompt', 'chosen', and 'rejected' columns.
+# We use a standard dataset for this demonstration.
+dataset_name: "trl-internal-testing/hh-rlhf-trl-style"
+# We only use a small subset for a quick run.
+dataset_subset_size: 1000
+
+# --- DPO Specific Parameters ---
+# Beta is the temperature parameter for the DPO loss. A value of 0.1 is a good starting point.
+beta: 0.1
+
+# --- Training Arguments ---
+# Many arguments are similar to SFT, but batch sizes are often smaller.
+output_dir: "./checkpoints/dpo-tinyllama-guanaco"
+num_train_epochs: 1
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 4
+optim: "paged_adamw_8bit"
+learning_rate: 5e-5
+weight_decay: 0.001 # Aligned with pretrain for consistency.
+fp16: false
+bf16: true
+max_grad_norm: 1.0 # Aligned with pretrain for consistency.
+logging_steps: 10
+max_length: 1024
+max_prompt_length: 512
+max_target_length: 512
+warmup_ratio: 0.1
+lr_scheduler_type: "linear"
+
+# --- PEFT is still used for DPO ---
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_modules:
+  - "q_proj"
+  - "k_proj"
+  - "v_proj"
+  - "o_proj"
+
+# --- Experiment Tracking ---
+report_to: "wandb"
+run_name: "dpo-tinyllama-guanaco-demo"
+
+# END OF FILE: configs/training/finetune_dpo.yaml

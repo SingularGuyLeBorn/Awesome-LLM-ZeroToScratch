@@ -1,0 +1,37 @@
+# FILE: configs/data/text_pretrain.yaml
+# Bedrock Protocol: Configuration for the text pre-training data pipeline.
+# This file centralizes all data-related paths and parameters, embodying
+# the "industrial-grade" config-driven approach.
+
+# --- Dataset Specification ---
+# Hugging Face dataset identifier. Pinned to a specific version for reproducibility.
+dataset_name: wikitext
+dataset_config_name: wikitext-2-raw-v1
+
+# --- Output & Cache Directories ---
+# Using absolute paths is recommended in production. Here we use relative paths
+# for portability within the project structure. These paths should ideally point
+# to a network-mounted drive like /root/autodl-tmp on AutoDL.
+base_output_dir: ./data
+
+# Subdirectory for the raw downloaded dataset.
+raw_data_dir: ${base_output_dir}/raw/wikitext-2-raw-v1
+
+# Subdirectory for the processed and cleaned dataset.
+processed_data_dir: ${base_output_dir}/processed/wikitext-2-raw-v1
+
+# Subdirectory for the trained tokenizer.
+tokenizer_output_path: ${base_output_dir}/tokenizers/wikitext_spm
+
+# --- Data Processing Parameters ---
+# Text column name in the dataset.
+text_column: text
+
+# --- Tokenizer Training Parameters ---
+# File name for the concatenated text corpus used to train the tokenizer.
+tokenizer_training_corpus: ${processed_data_dir}/corpus.txt
+vocab_size: 8000 # Smaller vocab for a demo model.
+model_type: unigram # Recommended model type by SentencePiece.
+character_coverage: 1.0 # For English, 1.0 is fine. For multilingual, 0.9995 is common.
+
+# END OF FILE: configs/data/text_pretrain.yaml

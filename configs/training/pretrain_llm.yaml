@@ -1,0 +1,69 @@
+# FILE: configs/training/pretrain_llm.yaml
+# Bedrock Protocol: Comprehensive configuration for LLM/VLM from-scratch pre-training.
+# This file centralizes all training-related hyperparameters and strategies.
+
+# --- Global Training Settings ---
+seed: 42
+output_dir: "./checkpoints/pretrain_llm_demo"
+# Checkpoint interval. Set to -1 to only save at the end.
+save_steps: 1000
+logging_steps: 10
+eval_steps: 1000 # Evaluate every X steps.
+max_steps: 50000 # Total training steps. Set to -1 to train for num_train_epochs.
+num_train_epochs: -1 # If max_steps > 0, this is ignored. Set to 1 for a quick demo epoch.
+
+# --- Model Configuration ---
+# Path to the specific model architecture YAML (e.g., 0.5B_dense.yaml, 0.8B_moe.yaml).
+model_config_path: "configs/model/0.5B_dense.yaml" # Change this to switch models.
+
+# --- Data Configuration ---
+# Path to the processed text data or VLM data.
+# This should point to the directory where data_processing/download_and_reproduce.py saved the data.
+dataset_dir: "./data/processed/wikitext"
+# Name of the column containing text data in the dataset.
+dataset_text_field: "text"
+# Max sequence length for tokenization and model input.
+max_seq_length: 1024
+
+# --- Optimizer ---
+optimizer: "adamw_torch" # "adamw_torch", "adamw_8bit", "lion"
+learning_rate: 3e-4
+weight_decay: 0.01
+adam_beta1: 0.9
+adam_beta2: 0.95
+adam_epsilon: 1e-8
+max_grad_norm: 1.0
+
+# --- Learning Rate Scheduler ---
+lr_scheduler_type: "cosine" # "linear", "cosine", "polynomial", "constant"
+warmup_ratio: 0.01 # Percentage of total steps for linear warmup.
+
+# --- Batching & Parallelism ---
+per_device_train_batch_size: 2 # Batch size per GPU.
+gradient_accumulation_steps: 16 # Accumulate gradients over X steps. Effective batch size = per_device_train_batch_size * gradient_accumulation_steps * num_gpus.
+# Mixed precision training. "bf16" is recommended for Ampere+ GPUs (A100, RTX30/40 series).
+# "fp16" is for older GPUs or when bf16 is not available.
+mixed_precision: "bf16" # "no", "fp16", "bf16"
+
+# --- DeepSpeed Configuration ---
+# Path to a DeepSpeed config JSON. Leave empty to use Accelerate's default DDP or FSDP.
+# For ZeRO-3 or Pipeline Parallelism, a DeepSpeed config JSON is essential.
+deepspeed_config: "" # e.g., "configs/deepspeed/zero3_config.json"
+
+# --- Memory Optimization (If not using DeepSpeed config) ---
+# These are Accelerate's native FSDP (Fully Sharded Data Parallel) options.
+# DeepSpeed Zero-3 offers similar benefits and is often preferred.
+# use_fsdp: false
+# fsdp_strategy: "SHARD_GRAD_OP" # "FULL_SHARD", "SHARD_GRAD_OP"
+# fsdp_cpu_offload: false # Offload optimizer states to CPU.
+
+# --- Efficiency Optimizations ---
+# torch.compile: Accelerates PyTorch code. Highly recommended.
+use_torch_compile: true
+# FlashAttention: Leveraged within model architecture (language_model.py) based on attention_type.
+
+# --- Experiment Tracking ---
+report_to: "wandb" # "wandb", "tensorboard", "none"
+run_name: "pretrain-0.5b-dense-demo" # Unique name for your W&B run.
+
+# END OF FILE: configs/training/pretrain_llm.yaml
