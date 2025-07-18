@@ -31,7 +31,7 @@
 2.  **执行VLM数据流水线:**
     此命令将下载并处理 `COCO` 数据集的一个小型子集。
     ```bash
-    python data_processing/download_and_reproduce.py vlm
+    python data_processing.download_and_reproduce.py vlm
     ```
     此命令将：
     *   下载 `COCO` 数据集的前100个样本到 `./data/raw/coco_demo/`。
