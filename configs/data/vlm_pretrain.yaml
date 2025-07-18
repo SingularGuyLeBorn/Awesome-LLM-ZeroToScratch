@@ -5,7 +5,7 @@
 # 更换为完全公开且易于加载的 COCO 验证集子集
 dataset_name: "lmms-lab/COCO-Caption2017" # 更换为 lmms-lab/COCO-Caption2017
 # 使用一个较小的样本数进行演示，以确保快速运行
-num_samples_to_process: 500 # 增加到500个样本，更具代表性
+num_samples_to_process: 3 # 增加到500个样本，更具代表性
 
 # --- Output & Cache Directories ---
 base_output_dir: ./data
