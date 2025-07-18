@@ -1,10 +1,10 @@
 # FILE: requirements.txt
 # This file specifies the exact versions of Python packages required for
 # this project, ensuring 100% reproducibility.
-# Mandate of Empirical Proof: A reproducible environment is a testable hypothesis.
+# The versions are chosen for compatibility and stability based on testing.
 
 # --- Core Deep Learning Framework ---
-# Pinned to a specific CUDA-compatible version for stability.
+# Pinned to a specific CUDA-compatible version.
 torch==2.3.0
 
 # --- Hugging Face Ecosystem ---
@@ -19,8 +19,9 @@ tokenizers==0.19.1
 deepspeed==0.14.2
 # PEFT for parameter-efficient fine-tuning techniques like LoRA.
 peft==0.10.0
-# For memory-efficient attention. Must be built against the correct CUDA version.
-flash-attn==2.5.8
+# For memory-efficient attention.
+# NOTE: This is installed separately and robustly via setup.sh.
+# flash-attn==2.5.8
 # Quantization library for running models with less memory.
 bitsandbytes==0.43.1
 
@@ -40,4 +41,4 @@ pyyaml==6.0.1
 # Used for linting and maintaining code style.
 ruff==0.4.4
 
-# END OF FILE: requirements.txt
+# END OF FILE

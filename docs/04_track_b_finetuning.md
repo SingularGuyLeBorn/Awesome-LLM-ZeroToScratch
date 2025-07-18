@@ -143,6 +143,6 @@ print(f"Merged model and tokenizer saved to {merged_model_output_dir}")
     *   **LoRA**: 使用消费级GPU成本极低。若租用AutoDL的3090（约¥2/小时），完成SFT+DPO全程可能只需花费 **几十元人民币**。
 
 ---
-**您已完成Track B。您不仅学会了如何微调模型，更掌握了从SFT到DPO这一业界领先的对齐技术。接下来，您可以移步至 [docs/05_deployment_and_evaluation.md](./docs/05_deployment_and_evaluation.md)，学习如何评估您训练好的模型并将其部署为服务。**
+**您已完成Track B。您不仅学会了如何微调模型，更掌握了从SFT到DPO这一业界领先的对齐技术。接下来，您可以移步至 [docs/05_deployment_and_evaluation.md](./05_deployment_and_evaluation.md)，学习如何评估您训练好的模型并将其部署为服务。**
 
 # END OF FILE: docs/04_track_b_finetuning.md

@@ -1,53 +1,89 @@
-# FILE: setup.sh
 #!/bin/bash
 
-# Bedrock Protocol: This script provides a deterministic, one-click setup
-# for the project environment. It embodies the "保姆级" philosophy.
-# It will exit immediately if any command fails.
+# ==============================================================================
+# Bedrock Protocol: One-Click Environment Setup Script
+# ==============================================================================
+# This script provides a deterministic, robust, and fast setup for the project
+# environment. It embodies the "保姆级" (nanny-level) philosophy by handling
+# potential issues like network instability and missing tools.
+#
+# The script will exit immediately if any command fails.
 set -e
 
 echo "--- [Bedrock] Starting Environment Setup ---"
 
-# --- Step 1: Install uv ---
-# uv is a fast Python package installer and resolver, which is significantly
-# faster than pip for dependency resolution and installation.
-echo "[1/4] Installing uv..."
-# We use pip to install uv itself into the active conda/venv environment.
-# Using --break-system-packages for root user is common in containers, though uv usually handles it well.
-pip install uv
-echo "uv installed successfully."
+# --- Helper Function to Ensure Command Exists ---
+# Before we use any tool, we make sure it's installed.
+ensure_command() {
+    if ! command -v "$1" &> /dev/null; then
+        echo "--- Command '$1' not found. Attempting to install..."
+        apt-get update && apt-get install -y "$2"
+        echo "--- '$1' installed successfully."
+    else
+        echo "--- Command '$1' is already installed."
+    fi
+}
 
-# --- Step 2: Install PyTorch and bitsandbytes FIRST ---
-# flash-attn (and potentially deepspeed) often require torch during their build process.
-# By installing torch and bitsandbytes explicitly here, we ensure they are available
-# in the environment before uv attempts to build other compiled packages.
-echo "[2/4] Installing PyTorch and bitsandbytes with uv (essential build dependencies)..."
-# We explicitly specify versions as in requirements.txt to maintain consistency.
-uv pip install torch==2.3.0 bitsandbytes==0.43.1
-echo "PyTorch and bitsandbytes installed."
 
-# --- Step 3: Install Remaining Core Dependencies with uv ---
-# Install all packages from requirements.txt, excluding torch and bitsandbytes
-# which were just installed. This prevents uv from trying to reinstall them
-# or encountering conflicts.
-echo "[3/4] Installing remaining core Python packages from requirements.txt using uv..."
-# Create a temporary filtered requirements file
-grep -v -E '^(torch|bitsandbytes|flash-attn)' requirements.txt > /tmp/requirements_filtered.txt
-uv pip install -r /tmp/requirements_filtered.txt
-rm /tmp/requirements_filtered.txt # Clean up temporary file
-echo "Remaining core dependencies installed with uv."
+# --- Step 1: Verify and Install Essential Tools ---
+echo "[1/5] Verifying essential tools (pip, uv, aria2c)..."
+ensure_command pip python3-pip
+ensure_command aria2c aria2
 
-# --- Step 4: Install FlashAttention LAST with --no-build-isolation ---
-# This step specifically addresses the ModuleNotFoundError for 'torch' during flash-attn build.
-# --no-build-isolation forces uv to use the current environment's packages for building.
-echo "[4/4] Installing FlashAttention with uv (disabling build isolation)..."
-# We explicitly specify version.
-uv pip install flash-attn==2.5.8 --no-build-isolation
-echo "FlashAttention installation attempted with uv. Please check for errors above."
+# --- Step 2: Install/Upgrade uv using pip ---
+# We use pip for the initial install of uv, our high-speed package manager.
+# A mirror is configured first to speed up this step itself.
+pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+pip install -U uv
+echo "--- uv installed/updated successfully."
+
+
+# --- Step 3: Install All Dependencies EXCEPT Flash Attention ---
+# We install everything else first. flash-attn is handled separately
+# due to its large size and potential for network-related download failures.
+echo "[2/5] Installing all packages from requirements.txt (except flash-attn)..."
+# Define mirror arguments for uv. This is crucial for speed.
+# NOTE: Ensure 'cu121' matches your target environment's CUDA version.
+UV_MIRROR_ARGS="--extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple --extra-index-url https://download.pytorch.org/whl/cu121"
+
+# We use uv to install from requirements.txt, which is much faster than pip.
+# We explicitly exclude flash-attn to handle it in the next step.
+uv pip install -r requirements.txt $UV_MIRROR_ARGS
+echo "--- Core dependencies installed successfully."
+
+
+# --- Step 4: Robustly Download Flash Attention ---
+# This is the most critical step. We download the large pre-compiled wheel
+# file using a robust downloader BEFORE trying to install it. This is the
+# key to overcoming network timeouts.
+echo "[3/5] Robustly downloading Flash Attention wheel..."
+# This URL is for torch 2.3.0 and CUDA 12.1/12.2/12.4. CHANGE IF YOUR ENV IS DIFFERENT.
+FLASH_ATTN_WHEEL_URL="https://github.com/Dao-AILab/flash-attention/releases/download/v2.5.8/flash_attn-2.5.8+cu122torch2.3cxx11abiTRUE-cp310-cp310-linux_x86_64.whl"
+FLASH_ATTN_WHEEL_FILE=$(basename "$FLASH_ATTN_WHEEL_URL")
+
+# Use aria2c for fast, multi-connection download.
+# The -c flag allows resuming if the download is interrupted.
+aria2c -c -x 16 -s 16 -o "$FLASH_ATTN_WHEEL_FILE" "$FLASH_ATTN_WHEEL_URL"
+echo "--- Flash Attention wheel downloaded successfully."
+
+
+# --- Step 5: Install Flash Attention From Local File ---
+# Now that the file is local, installation is instant and immune to network issues.
+echo "[4/5] Installing Flash Attention from local wheel file..."
+uv pip install "$FLASH_ATTN_WHEEL_FILE"
+echo "--- Flash Attention installed successfully."
+
+
+# --- Finalization ---
+echo "[5/5] Cleaning up downloaded files..."
+rm "$FLASH_ATTN_WHEEL_FILE"
+echo "--- Cleanup complete."
 
 echo ""
-echo "--- [Bedrock] Environment Setup Complete ---"
-echo "The environment has been configured. You are ready to proceed."
-echo "Next step: Follow the data preparation guide in docs/02_data_pipeline.md"
+echo "================================================="
+echo "✅ [Bedrock] Environment Setup Complete!"
+echo "All packages, including the tricky ones, are now installed."
+echo "You are ready to proceed with your project."
+echo "================================================="
 
-# END OF FILE: setup.sh
+# END OF FILE

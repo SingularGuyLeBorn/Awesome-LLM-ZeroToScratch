@@ -48,7 +48,7 @@
     *   **`vLLM`**: 一个高性能、低延迟的LLM推理和服务库。它使用PagedAttention（比FlashAttention更进一步）来高效管理GPU显存，并支持Continuous Batching，显著提高吞吐量。
     *   **`TGI (Text Generation Inference)`**: Hugging Face 开发的LLM推理服务器，由Rust实现，高性能且功能丰富，支持多种优化（如FlashAttention、quantization、stream generation）。
     *   **部署步骤**:
-        1.  **打包模型**: 将您的模型（如果使用了LoRA，先执行 `model.merge_and_unload()` 将适配器合并到基础模型中，这在 [`docs/04_track_b_finetuning.md`](./docs/04_track_b_finetuning.md) 中有概念性代码）转换为 `transformers` 格式。
+        1.  **打包模型**: 将您的模型（如果使用了LoRA，先执行 `model.merge_and_unload()` 将适配器合并到基础模型中，这在 [`docs/04_track_b_finetuning.md`](./04_track_b_finetuning.md) 中有概念性代码）转换为 `transformers` 格式。
         2.  **构建Docker镜像**: 使用 `vLLM` 或 `TGI` 提供的 Dockerfile 作为基础，将您的模型打包到镜像中。
         3.  **启动服务**: 在GPU实例上运行Docker容器，暴露API接口。
     *   **示例 (概念性 `Dockerfile` 片段):**

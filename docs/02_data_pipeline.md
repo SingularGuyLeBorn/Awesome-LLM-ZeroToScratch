@@ -108,7 +108,7 @@ python data_processing/build_tokenizer.py \
 ---
 **您已完成第二部分。现在，您拥有了干净、处理完毕的数据集和一个定制化的分词器，为模型训练奠定了坚实的基础。接下来，您可以选择进入以下任一赛道：**
 
-*   **赛道A: [docs/03_track_a_pretraining.md](./docs/03_track_a_pretraining.md)** (从零预训练)
-*   **赛道B: [docs/04_track_b_finetuning.md](./docs/04_track_b_finetuning.md)** (微调开源模型)
+*   **赛道A: [docs/03_track_a_pretraining.md](./03_track_a_pretraining.md)** (从零预训练)
+*   **赛道B: [docs/04_track_b_finetuning.md](./04_track_b_finetuning.md)** (微调开源模型)
 
 # END OF FILE: docs/02_data_pipeline.md

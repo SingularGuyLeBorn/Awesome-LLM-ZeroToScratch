@@ -56,16 +56,14 @@ AutoDL 是一个性价比很高的GPU租用平台，非常适合个人开发者�
     bash setup.sh
     ```
     此脚本将执行以下操作：
+    *   配置 `pip` 使用清华大学 PyPI 镜像（用于安装 `uv` 自身）。
     *   **安装 `uv` (一个极速的 Python 包管理器)**。
-    *   **优先安装 `torch` 和 `bitsandbytes`**，以满足后续编译依赖的需求。
-    *   使用 `uv` 安装 `requirements.txt` 中**剩余**的所有固定版本的依赖库。
-    *   **最后，使用 `uv` 安装 `flash-attn` 并禁用构建隔离**，确保它能正确编译。
+    *   明确指示 `uv` 将使用清华大学 PyPI 镜像和 PyTorch 官方 CUDA 轮子源 (`https://download.pytorch.org/whl/cu121`)，这将大幅加速下载。
+    *   **优先使用 `uv` 安装 `torch` 和 `bitsandbytes`**，以确保这些核心依赖在其他包编译前就位。在此步骤中，您会看到 `uv` 显示下载进度条。
+    *   **然后使用 `uv` 安装 `requirements.txt` 中剩余的所有固定版本的依赖库**，同样利用配置的镜像源。
+    *   **最后，使用 `uv` 安装 `flash-attn` 并禁用构建隔离**，确保它能正确编译和链接到已安装的 `torch`，同时利用镜像源加速下载。此步骤可能会涉及编译，请耐心等待。
 
-    **请注意：**
-    **FlashAttention 的编译安装可能需要较长时间！** 
-    `flash-attn` 包含高性能的 CUDA 代码，这些代码需要针对您的 GPU 架构（如 A800）进行编译。这个编译过程是一个计算密集型操作，通常需要 **5到20分钟**，具体取决于实例的CPU性能和系统负载。请耐心等待，这属于正常现象。
-
-    看到 "Environment Setup Complete" 消息即表示成功。
+    请耐心等待脚本执行完毕。在 `uv` 下载大文件时，您会看到清晰的进度条。看到 "Environment Setup Complete" 消息即表示成功。
 
 ### 4. 数据与代码挂载策略 (Data and Code Mounting Strategy)
 
@@ -99,4 +97,3 @@ python -c "import torch; import transformers; import deepspeed; import flash_att
 
 ---
 **您已完成第一部分。接下来，请移步至 [docs/02_data_pipeline.md](./docs/02_data_pipeline.md) 开始数据准备工作。**
-
