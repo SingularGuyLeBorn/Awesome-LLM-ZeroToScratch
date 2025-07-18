@@ -1,0 +1,43 @@
+# FILE: .deepwiki.yml
+# Deep-Wiki Configuration for Awesome-LLM-ZeroToScratch
+
+# 项目名称，将显示在Deep-Wiki页面上
+name: "Awesome LLM ZeroToScratch"
+
+# 项目的简短描述
+description: "An end-to-end, code-driven tutorial for pre-training and fine-tuning LLMs and VLMs, designed to be both nanny-level accessible and industrial-grade robust."
+
+# 定义文档的根文件，通常是README
+root: "README.md"
+
+# 指定代码和文档的路径，帮助Deep-Wiki聚焦于最重要的部分
+sources:
+  - path: "src/"
+    description: "Core source code for models, trainers, inference, and evaluation logic."
+  - path: "docs/"
+    description: "Detailed step-by-step tutorial documentation."
+  - path: "configs/"
+    description: "YAML configuration files for all experiments (data, models, training)."
+  - path: "scripts/"
+    description: "Shell scripts to launch training and inference jobs."
+
+# 指定需要排除的路径，避免扫描不必要的文件
+exclude:
+  - "data/"
+  - "checkpoints/"
+  - "wandb/"
+  - ".idea/"
+  - ".vscode/"
+  - "__pycache__/"
+  - "*.egg-info/"
+  - "/autodl-tmp/"
+
+# (可选) 为项目添加标签，方便分类和搜索
+tags:
+  - "LLM"
+  - "VLM"
+  - "Pre-training"
+  - "Fine-tuning"
+  - "PyTorch"
+  - "DeepSpeed"
+  - "Tutorial"
