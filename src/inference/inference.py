@@ -9,10 +9,10 @@ load a base model and its associated LoRA adapters.
 
 import torch
 import sys
-import yaml  # Added for config parsing
+import yaml
 from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import PeftModel, PeftConfig  # Added PeftConfig
+from peft import PeftModel, PeftConfig
 
 
 def run_inference_cli(model_path: str, max_new_tokens: int = 200) -> None:
@@ -49,7 +49,10 @@ def run_inference_cli(model_path: str, max_new_tokens: int = 200) -> None:
             print(f"Warning: Could not extract base model from PEFT config ({e}).")
             print("Attempting to infer base model from SFT config for tutorial purposes.")
             try:
-                sft_config_path = Path(__file__).resolve().parents / "configs/training/finetune_sft.yaml"
+                # 修正: 更稳健地推断项目根目录和 SFT 配置路径
+                script_path = Path(__file__).resolve()
+                project_root = script_path.parent.parent.parent # Assuming script is in src/inference/
+                sft_config_path = project_root / "configs/training/finetune_sft.yaml"
                 with open(sft_config_path, 'r') as f:
                     sft_config = yaml.safe_load(f)
                 base_model_name_or_path = sft_config['model_name_or_path']
@@ -131,7 +134,8 @@ def run_inference_cli(model_path: str, max_new_tokens: int = 200) -> None:
                 )
 
             # Decode the generated tokens. Skip input tokens for cleaner output.
-            generated_text = tokenizer.decode(outputs[inputs.input_ids.shape:], skip_special_tokens=True)
+            # 修正: 确保切片索引正确，outputs 是一个张量
+            generated_text = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
             print(f"Model: {generated_text.strip()}")
 
         except KeyboardInterrupt:

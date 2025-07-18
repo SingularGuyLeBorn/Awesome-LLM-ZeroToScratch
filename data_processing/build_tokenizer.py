@@ -17,7 +17,15 @@ import shutil  # 用于文件复制
 import json  # 用于生成 JSON 配置
 from transformers import PreTrainedTokenizerFast, AutoTokenizer
 
-# 配置日志
+# 修正: 配置日志, 确保脚本独立运行时也能正常输出
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout) # 默认输出到控制台
+    ]
+)
+# 获取日志器
 logger = logging.getLogger(__name__)
 
 

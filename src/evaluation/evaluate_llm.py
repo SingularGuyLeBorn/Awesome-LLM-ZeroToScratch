@@ -12,11 +12,11 @@ comprehensive benchmark run within this simplified tutorial context.
 """
 
 import sys
-import yaml  # Added for config parsing
+import yaml
 from pathlib import Path
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import PeftModel, PeftConfig  # Added PeftConfig
+from peft import PeftModel, PeftConfig
 
 
 # Placeholder for lm-evaluation-harness.
@@ -49,7 +49,10 @@ def run_evaluation(model_path: str, tasks: str = "mmlu_flan_n_shot", num_samples
             print(f"Warning: Could not extract base model from PEFT config ({e}).")
             print("Attempting to infer base model from SFT config for tutorial purposes.")
             try:
-                sft_config_path = Path(__file__).resolve().parents / "configs/training/finetune_sft.yaml"
+                # 修正: 更稳健地推断项目根目录和 SFT 配置路径
+                script_path = Path(__file__).resolve()
+                project_root = script_path.parent.parent.parent # Assuming script is in src/evaluation/
+                sft_config_path = project_root / "configs/training/finetune_sft.yaml"
                 with open(sft_config_path, 'r') as f:
                     sft_config = yaml.safe_load(f)
                 base_model_name_or_path = sft_config['model_name_or_path']
@@ -126,9 +129,9 @@ if __name__ == "__main__":
             "Example: python src/evaluation/evaluate_llm.py ./checkpoints/sft-tinyllama-guanaco/final_model mmlu_flan_n_shot 50")
         sys.exit(1)
 
-    model_path_arg = sys.argv
-    tasks_arg = sys.argv if len(sys.argv) > 2 else "mmlu_flan_n_shot"
-    num_samples_arg = int(sys.argv) if len(sys.argv) > 3 else 10
+    model_path_arg = sys.argv[1] # 修正: 获取正确的命令行参数
+    tasks_arg = sys.argv[2] if len(sys.argv) > 2 else "mmlu_flan_n_shot" # 修正: 获取正确的命令行参数
+    num_samples_arg = int(sys.argv[3]) if len(sys.argv) > 3 else 10 # 修正: 获取正确的命令行参数
 
     run_evaluation(model_path_arg, tasks_arg, num_samples_arg)
 

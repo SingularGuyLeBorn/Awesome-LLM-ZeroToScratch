@@ -60,14 +60,14 @@ class StandardAttention(nn.Module):
     def forward(
             self,
             hidden_states: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None  # Padding mask: (batch_size, 1, 1, seq_len)
+            attention_mask: Optional[torch.Tensor] = None  # 修正: 接收 2D padding mask (batch_size, seq_len)
     ) -> torch.Tensor:
         """
         Forward pass for standard multi-head self-attention.
 
         Args:
             hidden_states: Input tensor of shape (batch_size, seq_len, hidden_size).
-            attention_mask: Optional padding mask tensor of shape (batch_size, 1, 1, seq_len).
+            attention_mask: Optional padding mask tensor of shape (batch_size, seq_len).
                             This mask will be combined with the causal mask internally.
 
         Returns:
@@ -91,15 +91,22 @@ class StandardAttention(nn.Module):
 
         # Compute attention scores
         # (bs, num_heads, seq_len, head_dim) @ (bs, num_heads, head_dim, seq_len)
-        attn_scores = torch.matmul(query_states, key_states.transpose(-1, -2)) * self.scaling
+        # attn_scores = torch.matmul(query_states, key_states.transpose(-1, -2)) * self.scaling # No longer needed with SDPA
 
         # Apply attention mask: Combine causal mask and padding mask
-        # We use F.scaled_dot_product_attention which handles both efficiently.
+        # 修正: 将 2D padding mask 转换为 4D bias mask
+        extended_attention_mask = None
+        if attention_mask is not None:
+            # Expand to (batch_size, 1, 1, seq_len) and convert to bias format (-inf for masked, 0 for not)
+            extended_attention_mask = (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * torch.finfo(
+                query_states.dtype).min
+
+
         attn_output = F.scaled_dot_product_attention(
             query_states,
             key_states,
             value_states,
-            attn_mask=attention_mask,  # Pass padding mask here
+            attn_mask=extended_attention_mask,  # Pass padding mask here
             is_causal=True  # Explicitly apply causal mask
         )
 

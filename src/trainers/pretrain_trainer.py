@@ -22,7 +22,10 @@ from tqdm.auto import tqdm
 import wandb
 
 # Ensure project root is in path for imports
-sys.path.append(str(Path(__file__).resolve().parents))
+# 修正: 找到项目根目录并添加到 sys.path
+script_path = Path(__file__).resolve()
+project_root = script_path.parent.parent.parent # Assuming script is in src/trainers/
+sys.path.append(str(project_root))
 
 from src.models.language_model import BaseLLM
 
@@ -69,20 +72,26 @@ def run_pretrain(config_path: str) -> None:
         print("WandB initialized.")
 
     # 4. Load Model Architecture Configuration
-    model_config_path = Path(config_path).parent.parent / config['model_config_path']
+    # 修正: 使用 project_root 来构建模型配置路径
+    model_config_path = project_root / config['model_config_path']
     print(f"Loading model architecture configuration from: {model_config_path}")
     with open(model_config_path, 'r') as f:
         model_config = yaml.safe_load(f)
 
     # 5. Load Tokenizer
     # Tokenizer is now saved in Hugging Face format by build_tokenizer.py
-    tokenizer_load_path = Path(model_config['tokenizer_path']).parent / (
-                Path(model_config['tokenizer_path']).name + "_hf")
+    # 修正: 使用 project_root 来构建分词器路径
+    tokenizer_load_path = project_root / Path(model_config['tokenizer_path']).parent.name / (
+                Path(model_config['tokenizer_path']).name + "_hf") # Correctly construct path to _hf dir
 
+    # Fallback if the above path construction isn't perfectly right, try the exact path from config + _hf
     if not tokenizer_load_path.exists():
-        print(f"Error: Hugging Face format tokenizer not found at {tokenizer_load_path}.")
-        print("Please ensure `data_processing/download_and_reproduce.py text` was run successfully.")
-        sys.exit(1)
+        tokenizer_load_path = Path(model_config['tokenizer_path'] + "_hf")
+        if not tokenizer_load_path.exists():
+            print(f"Error: Hugging Face format tokenizer not found at {tokenizer_load_path}.")
+            print("Please ensure `data_processing/download_and_reproduce.py text` was run successfully.")
+            sys.exit(1)
+
 
     print(f"Loading tokenizer from Hugging Face format: {tokenizer_load_path}")
     tokenizer = AutoTokenizer.from_pretrained(
@@ -102,31 +111,68 @@ def run_pretrain(config_path: str) -> None:
     def tokenize_function(examples):
         # Handle cases where 'text' column might be a list or single string
         texts = examples[config['dataset_text_field']]
-        if isinstance(texts, list) and isinstance(texts, list):
-            # If text_field contains lists of lists (e.g., VLM captions)
+        if isinstance(texts, list) and all(isinstance(elem, list) for elem in texts):
+            # If text_field contains lists of lists (e.g., VLM captions after processing)
             texts = [" ".join(sublist) for sublist in texts]
+        elif isinstance(texts, list) and any(not isinstance(elem, str) for elem in texts):
+            # Handle cases where some elements might not be strings
+            texts = [str(elem) if elem is not None else "" for elem in texts]
+        elif isinstance(texts, str):
+            texts = [texts] # Wrap single string in a list for tokenizer
 
-        return tokenizer(
-            texts,
+        # Filter out empty strings before tokenization to avoid errors
+        filtered_texts = [t for t in texts if t.strip()]
+        if not filtered_texts:
+            return {"input_ids": [], "attention_mask": []} # Return empty if no valid text
+
+        tokenized_output = tokenizer(
+            filtered_texts, # 修正: 使用 filtered_texts
             max_length=config['max_seq_length'],
             truncation=True,
             padding="max_length"  # Pad to max_seq_length for uniform batching
         )
+        return tokenized_output
 
     # Mandate of Empirical Proof: Tokenization is deterministic.
     # num_proc should be tuned based on CPU cores.
     num_processes_for_map = os.cpu_count() if os.cpu_count() is not None else 1
     print(f"Using {num_processes_for_map} processes for dataset tokenization.")
 
+    # 修正: 调整 remove_columns 逻辑，确保正确处理 VLM 和 LLM 的列
+    columns_to_remove = [col for col in raw_dataset['train'].column_names if col not in ['pixel_values', 'input_ids', 'attention_mask']]
+    if config.get('is_vlm', False):
+        # For VLM, keep 'pixel_values', 'input_ids', 'attention_mask', and potentially 'cleaned_captions'/'distilled_captions' for debug/info
+        # If 'cleaned_captions' is the source of text, it should be removed after tokenization
+        if config['dataset_text_field'] in columns_to_remove:
+            columns_to_remove.remove(config['dataset_text_field']) # Ensure text field used for tokenization is removed
+        # Ensure we don't remove other useful VLM columns if they are not 'pixel_values'
+        vlm_specific_cols = ['processed_image_tensor', 'cleaned_captions', 'distilled_captions', 'is_valid']
+        for col in vlm_specific_cols:
+            if col in columns_to_remove:
+                columns_to_remove.remove(col)
+    else:
+        # For LLM, remove the original text column after tokenization
+        if config['dataset_text_field'] in raw_dataset['train'].column_names:
+            columns_to_remove.append(config['dataset_text_field'])
+        # Remove duplicates from columns_to_remove
+        columns_to_remove = list(set(columns_to_remove))
+
+
     tokenized_dataset = raw_dataset.map(
         tokenize_function,
         batched=True,
-        # Only remove text column if not VLM, as VLM might need image column
-        remove_columns=[col for col in raw_dataset['train'].column_names if col not in ['pixel_values']],
-        # Keep pixel_values for VLM
+        remove_columns=columns_to_remove, # 修正：使用调整后的 remove_columns
         num_proc=num_processes_for_map,
         desc="Running tokenizer on dataset"
     )
+
+    # 过滤掉 input_ids 为空的样本（例如，如果原始文本被过滤掉）
+    tokenized_dataset = tokenized_dataset.filter(
+        lambda x: len(x["input_ids"]) > 0,
+        num_proc=num_processes_for_map,
+        desc="Filtering empty tokenized examples"
+    )
+
 
     # Create DataLoaders
     # num_workers can be optimized; for small demos, 0 or 4 is common.
@@ -215,7 +261,7 @@ def run_pretrain(config_path: str) -> None:
             # Forward pass
             outputs = model(
                 input_ids=input_ids,
-                attention_mask=attention_mask,
+                attention_mask=attention_mask, # 修正: 传递 2D attention_mask
                 pixel_values=pixel_values
             )
             logits = outputs['logits']
@@ -275,11 +321,7 @@ def run_pretrain(config_path: str) -> None:
                         tokenizer_save_path = output_path / "hf_tokenizer"
                         model_save_path.mkdir(parents=True, exist_ok=True)
                         tokenizer_save_path.mkdir(parents=True, exist_ok=True)
-                        unwrapped_model.lm_head.weight = unwrapped_model.embed_tokens.weight  # Ensure weight tying before saving
-                        # This save_pretrained is only if BaseLLM was inheriting from PreTrainedModel
-                        # For now, it will save the state_dict as a standard PyTorch model.
-                        # For a custom model, we need custom `save_pretrained` logic if HF compatibility is critical.
-                        # For this tutorial, we save state_dict for custom models, HF for fine-tuned.
+                        # unwrapped_model.lm_head.weight = unwrapped_model.embed_tokens.weight  # Weight tying should be in __init__
                         torch.save(unwrapped_model.state_dict(), str(model_save_path / "pytorch_model.bin"))
                         tokenizer.save_pretrained(str(tokenizer_save_path))
                         print(f"Model and tokenizer checkpoint saved at step {completed_steps} to {output_path}")
@@ -301,9 +343,7 @@ def run_pretrain(config_path: str) -> None:
         # Save the final model state and tokenizer in HF compatible format
         unwrapped_model = accelerator.unwrap_model(model)
         final_model_path.mkdir(parents=True, exist_ok=True)
-        # For a custom BaseLLM, we save its state dict and the tokenizer.
-        # If BaseLLM were a transformers.PreTrainedModel, we'd use unwrapped_model.save_pretrained().
-        unwrapped_model.lm_head.weight = unwrapped_model.embed_tokens.weight  # Re-tie weights
+        # unwrapped_model.lm_head.weight = unwrapped_model.embed_tokens.weight  # Weight tying should be in __init__
         torch.save(unwrapped_model.state_dict(), str(final_model_path / "pytorch_model.bin"))
         tokenizer.save_pretrained(str(final_model_path))  # Save tokenizer to the same dir
 
@@ -319,7 +359,7 @@ if __name__ == "__main__":
         print("Usage: python src/trainers/pretrain_trainer.py <path_to_config.yaml>")
         sys.exit(1)
 
-    config_file_path = sys.argv
+    config_file_path = sys.argv[1] # 修正: 获取正确的命令行参数
     run_pretrain(config_file_path)
 
 # END OF FILE: src/trainers/pretrain_trainer.py

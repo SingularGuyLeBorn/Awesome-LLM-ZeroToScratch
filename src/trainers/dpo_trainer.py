@@ -162,7 +162,7 @@ if __name__ == "__main__":
         print("Usage: python src/trainers/dpo_trainer.py <path_to_config.yaml>")
         sys.exit(1)
 
-    config_file_path = sys.argv
+    config_file_path = sys.argv[1] # 修正: 获取正确的命令行参数
     run_dpo(config_file_path)
 
 # END OF FILE: src/trainers/dpo_trainer.py

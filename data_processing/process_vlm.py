@@ -102,26 +102,34 @@ def process_vlm_dataset(
         image = example[image_column]
         captions = example[text_column]
 
-        if not isinstance(image, Image.Image):
-            logger.warning(f"检测到非图像类型数据进行处理，已跳过：{type(image)}")
-            return {"processed_image_tensor": None, "cleaned_captions": [], "distilled_captions": []}
+        # 修正: 检查图像是否有效，并标记是否有效
+        if not isinstance(image, Image.Image) or image is None:
+            logger.warning(f"检测到非图像类型或空图像数据进行处理，已跳过：{type(image)}。索引：{example.get('idx', 'N/A')}")
+            return {"processed_image_tensor": None, "cleaned_captions": [], "distilled_captions": [], "is_valid": False}
 
         # Ensure image is in RGB format, a common requirement for models.
         if image.mode != "RGB":
-            image = image.convert("RGB")
+            try:
+                image = image.convert("RGB")
+            except Exception as e:
+                logger.warning(f"无法将图像转换为 RGB 格式，跳过该图像。错误：{e}。索引：{example.get('idx', 'N/A')}")
+                return {"processed_image_tensor": None, "cleaned_captions": [], "distilled_captions": [], "is_valid": False}
+
 
         # Apply image transformations
         processed_image_tensor = image_transform(image)
 
         # Clean up captions
+        cleaned_captions = []
         if isinstance(captions, list):
+            # Assumes captions is a list of dictionaries like [{'caption': '...'}]
             cleaned_captions = [cap['caption'].strip() for cap in captions if
                                 isinstance(cap, dict) and 'caption' in cap and cap['caption'].strip()]
         elif isinstance(captions, str):
             cleaned_captions = [captions.strip()]
         else:
-            cleaned_captions = []
-            logger.warning(f"检测到非字符串或列表类型的文本数据，已跳过清洗: {type(captions)}")
+            logger.warning(f"检测到非字符串或列表类型的文本数据，已跳过清洗: {type(captions)}。索引：{example.get('idx', 'N/A')}")
+
 
         # --- Data Distillation Step ---
         distilled_captions = []
@@ -134,7 +142,8 @@ def process_vlm_dataset(
         return {
             "processed_image_tensor": processed_image_tensor,
             "cleaned_captions": cleaned_captions,
-            "distilled_captions": distilled_captions
+            "distilled_captions": distilled_captions,
+            "is_valid": True # 修正：标记为有效样本
         }
 
     # Image processing is often harder to parallelize safely with .map due to PIL/Tensor interop issues,
@@ -142,10 +151,17 @@ def process_vlm_dataset(
     # num_proc=1 for VLM data processing is safer due to potential external libraries/APIs.
     processed_dataset = dataset.map(
         process_example,
-        num_proc=1,
+        num_proc=1, # 保持为1，避免PIL/CUDA上下文问题
         desc="处理 VLM 样本"
     )
     logger.info("VLM 数据集处理完成。")
+
+    # 修正：过滤掉无效样本
+    initial_count = len(processed_dataset)
+    processed_dataset = processed_dataset.filter(lambda x: x["is_valid"] is True, desc="过滤无效 VLM 样本")
+    processed_dataset = processed_dataset.remove_columns("is_valid") # 移除临时标记列
+    logger.info(f"VLM 样本过滤完成。原始样本数: {initial_count}, 过滤后样本数: {len(processed_dataset)} (移除了 {initial_count - len(processed_dataset)} 个无效项)")
+
     return processed_dataset
 
 
@@ -171,14 +187,15 @@ def deduplicate_vlm_dataset(dataset: Dataset, image_column: str, text_column: st
         processed_image_tensor = example.get("processed_image_tensor")
         cleaned_captions = example.get("cleaned_captions")
 
-        # Skip if essential data is missing
+        # Skip if essential data is missing (should be handled by previous filter, but double check)
         if processed_image_tensor is None or not cleaned_captions:
             logger.debug(f"跳过索引 {i} 的样本去重，因缺少处理后的图像或清洗后的字幕。")
             continue
 
         # Create a unique identifier for each example
         # Convert tensor to bytes for hashing
-        image_bytes = processed_image_tensor.cpu().numpy().tobytes()
+        # 修正: 确保 tensor 是 CPU 的，且是 float32，避免不同 dtype/device 导致 hash 不同
+        image_bytes = processed_image_tensor.cpu().float().numpy().tobytes()
         image_hash = hashlib.md5(image_bytes).hexdigest()
 
         # Combine image hash with a sorted, joined string of cleaned captions

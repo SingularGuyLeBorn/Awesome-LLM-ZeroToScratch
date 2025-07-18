@@ -63,65 +63,73 @@ class FlashAttention(nn.Module):
     def forward(
             self,
             hidden_states: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None
-            # Padding mask: (batch_size, seq_len) or (batch_size, 1, 1, seq_len)
+            attention_mask: Optional[torch.Tensor] = None # 修正: 接收 2D padding mask (batch_size, seq_len)
     ) -> torch.Tensor:
         """
         Forward pass for FlashAttention (or fallback to PyTorch SDPA).
 
         Args:
             hidden_states: Input tensor of shape (batch_size, seq_len, hidden_size).
-            attention_mask: Optional padding mask (batch_size, seq_len) or
-                            (batch_size, 1, 1, seq_len). FlashAttention internally handles
-                            causality. For PyTorch SDPA, `is_causal=True` handles causality,
+            attention_mask: Optional padding mask (batch_size, seq_len).
+                            FlashAttention internally handles causality. For PyTorch SDPA, `is_causal=True` handles causality,
                             and this `attention_mask` handles padding.
 
         Returns:
             Output tensor of shape (batch_size, seq_len, hidden_size).
         """
+        batch_size, seq_len, _ = hidden_states.shape # 修正：获取 batch_size 和 seq_len
+
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
         # Reshape for multi-head processing for both FlashAttention and PyTorch SDPA
         # (batch_size, seq_len, hidden_size) -> (batch_size, seq_len, num_heads, head_dim)
-        query_states = query_states.view(query_states.shape, query_states.shape, self.num_attention_heads,
-                                         self.head_dim)
-        key_states = key_states.view(key_states.shape, key_states.shape, self.num_attention_heads, self.head_dim)
-        value_states = value_states.view(value_states.shape, value_states.shape, self.num_attention_heads,
-                                         self.head_dim)
+        # 修正：view函数参数应为元组
+        query_states = query_states.view(batch_size, seq_len, self.num_attention_heads, self.head_dim)
+        key_states = key_states.view(batch_size, seq_len, self.num_attention_heads, self.head_dim)
+        value_states = value_states.view(batch_size, seq_len, self.num_attention_heads, self.head_dim)
 
         if self.has_flash_attn:
             # FlashAttention requires QKV to be in (B, S, H, D) format
             # `causal=True` directly enforces causal masking within FlashAttention.
-            # Padding mask handling: FlashAttention v2+ handles attention_mask (padding) directly.
-            # If attention_mask is (B, S), it will be handled by flash_attn_func automatically.
+            # 修正：将 2D attention_mask 转换为 key_padding_mask (True for padded)
+            key_padding_mask = None
+            if attention_mask is not None:
+                # FlashAttention 的 key_padding_mask 通常是布尔型，True 表示要 mask 的位置 (即填充)
+                key_padding_mask = (attention_mask == 0) # 原始 attention_mask 1 为有效，0 为填充
+
             attn_output = flash_attn_func(
                 query_states,
                 key_states,
                 value_states,
                 dropout_p=0.0,  # Dropout is typically handled by FlashAttention internally.
-                # Can be passed as `p` if needed for training.
-                softmax_scale=None,  # Auto-calculated by FlashAttention.
                 causal=True,  # For language modeling, we always need a causal mask.
-                # If padding mask is provided, pass it:
-                # attention_mask=attention_mask # Only if attention_mask is B,S
+                key_padding_mask=key_padding_mask # 传入 key_padding_mask
             )
         else:
             # Fallback to PyTorch's native Scaled Dot-Product Attention (SDPA)
             # PyTorch 2.0+ has a highly optimized native SDPA implementation.
             # `is_causal=True` ensures causal masking. The `attn_mask` argument is for padding.
             # Ensure query, key, value are (B, H, S, D) for SDPA.
+            # 修正：将 2D attention_mask 转换为 4D bias mask
+            extended_attention_mask = None
+            if attention_mask is not None:
+                extended_attention_mask = (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * torch.finfo(
+                    query_states.dtype).min
+
             attn_output = F.scaled_dot_product_attention(
                 query_states.permute(0, 2, 1, 3),  # (B, H, S, D)
                 key_states.permute(0, 2, 1, 3),  # (B, H, S, D)
                 value_states.permute(0, 2, 1, 3),  # (B, H, S, D)
-                attn_mask=attention_mask,  # This is where the padding mask is applied.
+                attn_mask=extended_attention_mask,  # Pass padding mask here
                 is_causal=True,  # Explicitly tell SDPA to apply a causal mask.
             ).permute(0, 2, 1, 3)  # Permute back to (B, S, H, D)
 
         # Merge heads
-        attn_output = attn_output.contiguous().view(attn_output.shape, attn_output.shape, self.hidden_size)
+        # attn_output is (batch_size, seq_len, num_heads, head_dim)
+        # 修正：view函数参数应为元组
+        attn_output = attn_output.contiguous().view(batch_size, seq_len, self.hidden_size)
 
         # Output projection
         output = self.o_proj(attn_output)

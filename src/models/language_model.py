@@ -31,6 +31,7 @@ class VisionEncoderDummy(nn.Module):
 
     def __init__(self, output_dim: int = 768, num_image_tokens: int = 256):
         super().__init__()
+        self.output_dim = output_dim  # 修正：添加 output_dim 属性
         # Simulate a patch embedding / feature extraction: (C, H, W) -> (num_tokens, feature_dim)
         # For simplicity, we use a Conv2D and then flatten.
         self.conv = nn.Conv2d(3, output_dim // 4, kernel_size=16, stride=16)  # Roughly matches ViT patches
@@ -46,9 +47,24 @@ class VisionEncoderDummy(nn.Module):
         Returns:
             Image features of shape (batch_size, num_image_tokens, output_dim).
         """
-        # Ensure input is 3 channels for conv.
-        if pixel_values.shape == 4:  # Handle RGBA
-            pixel_values = pixel_values[:, :3, :, :]
+        # 修正：更鲁棒的输入检查和转换
+        if pixel_values.dim() == 4:
+            if pixel_values.shape[1] == 4:  # Handle RGBA (convert to RGB)
+                pixel_values = pixel_values[:, :3, :, :]
+            elif pixel_values.shape[1] != 3:  # If not 3 channels already, try to transpose (H, W, C) to (C, H, W)
+                if pixel_values.shape[3] == 3:  # Assuming (B, H, W, C)
+                    pixel_values = pixel_values.permute(0, 3, 1, 2)
+                else:
+                    print(
+                        f"Warning: Unexpected channel dimension for VisionEncoderDummy: {pixel_values.shape}. Expecting 3 or 4 channels in dim 1 or 4.")
+                    # Return zero tensor to avoid crash, but issue a warning
+                    return torch.zeros(pixel_values.shape[0], self.num_image_tokens, self.output_dim,
+                                       device=pixel_values.device, dtype=pixel_values.dtype)
+        else:
+            print(
+                f"Warning: Unexpected pixel_values dimension for VisionEncoderDummy: {pixel_values.dim()}. Expected 4D tensor (B, C, H, W).")
+            return torch.zeros(pixel_values.shape[0], self.num_image_tokens, self.output_dim,
+                               device=pixel_values.device, dtype=pixel_values.dtype)
 
         features = self.conv(pixel_values)  # (bs, output_dim//4, H/16, W/16)
         features = self.pool(features)  # (bs, output_dim//4, 1, num_image_tokens)
@@ -66,22 +82,22 @@ class TransformerBlock(nn.Module):
     def __init__(self, config: Dict[str, Any]):
         super().__init__()
         self.hidden_size = config['hidden_size']
+        self.attention_type = config.get("attention_type", "standard")  # 获取 attention_type
 
         # Layer Normalization before attention (Pre-normalization)
         self.input_layernorm = nn.LayerNorm(self.hidden_size, eps=1e-5)  # Common epsilon for LLMs
 
         # Attention layer selection
-        attention_type = config.get("attention_type", "standard")
-        if attention_type == "flash":
+        if self.attention_type == "flash":
             self.self_attn = FlashAttention(
                 self.hidden_size, config['num_attention_heads']
             )
-        elif attention_type == "standard":
+        elif self.attention_type == "standard":
             self.self_attn = StandardAttention(
                 self.hidden_size, config['num_attention_heads']
             )
         else:
-            raise ValueError(f"Unsupported attention_type: {attention_type}")
+            raise ValueError(f"Unsupported attention_type: {self.attention_type}")
 
         # Layer Normalization before FFN/MoE
         self.post_attention_layernorm = nn.LayerNorm(self.hidden_size, eps=1e-5)
@@ -106,7 +122,7 @@ class TransformerBlock(nn.Module):
     def forward(
             self,
             hidden_states: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None  # Padding mask (batch_size, 1, 1, seq_len)
+            attention_mask: Optional[torch.Tensor] = None  # 修正: 统一接收 2D padding mask (batch_size, seq_len)
     ) -> torch.Tensor:
         """
         Forward pass through a single Transformer block.
@@ -117,7 +133,9 @@ class TransformerBlock(nn.Module):
 
         # Self-Attention
         # The attention module itself handles combining the padding mask with causal masking.
-        attn_output = self.self_attn(hidden_states, attention_mask)
+        # 修正: 统一传递 2D attention_mask 给注意力模块
+        attn_output = self.self_attn(hidden_states, attention_mask=attention_mask)
+
         hidden_states = residual + attn_output  # Add residual connection
 
         # Feed-Forward Network / MoE
@@ -151,13 +169,14 @@ class BaseLLM(nn.Module):
         self.hidden_size = config['hidden_size']
         self.max_position_embeddings = config['max_position_embeddings']
         self.num_image_tokens = config.get("num_image_tokens", 256)  # Default for VLM
+        self.attention_type = config.get("attention_type", "standard")  # 获取 attention_type
 
         # 1. Token Embeddings
         self.embed_tokens = nn.Embedding(self.vocab_size, self.hidden_size)
 
         # 2. Vision Encoder (Optional, for VLM)
         # This is a conceptual placeholder. In a real VLM, you'd load a pre-trained
-        # vision model (e.g., CLIP) here and freeze its weights during training.
+        # vision model (e.g., CLIP's ViT).
         self.vision_encoder = None
         self.vision_projector = None
         if config.get("is_vlm", False):  # A flag in config to indicate VLM
@@ -175,7 +194,9 @@ class BaseLLM(nn.Module):
 
             # The projector maps vision features to the language model's hidden_size
             self.vision_projector = nn.Sequential(
-                nn.Linear(vision_feature_dim, config.get("vision_projector_hidden_size", self.hidden_size * 2)),
+                # 修正：输入维度为 (vision_feature_dim * num_image_tokens)
+                nn.Linear(vision_feature_dim * self.num_image_tokens,
+                          config.get("vision_projector_hidden_size", self.hidden_size * 2)),
                 nn.SiLU(),
                 nn.Linear(config.get("vision_projector_hidden_size", self.hidden_size * 2),
                           self.hidden_size * self.num_image_tokens)
@@ -213,7 +234,7 @@ class BaseLLM(nn.Module):
     def forward(
             self,
             input_ids: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None,  # Padding mask (batch_size, seq_len)
+            attention_mask: Optional[torch.Tensor] = None,  # 原始 2D padding mask (batch_size, seq_len)
             pixel_values: Optional[torch.Tensor] = None  # For VLM, shape (batch_size, channels, H, W)
     ) -> Dict[str, torch.Tensor]:
         """
@@ -241,18 +262,17 @@ class BaseLLM(nn.Module):
         current_seq_len = seq_len  # Track current sequence length as we might prepend image tokens
 
         # 2. Process Vision Input (if VLM)
+        # 修正: 图像特征处理流程，并调整 attention_mask
         if self.vision_encoder is not None and pixel_values is not None:
             # Mandate of Proactive Defense: Ensure vision data is correctly processed.
-            # In a real VLM, `pixel_values` would be processed by the actual vision encoder.
             image_features = self.vision_encoder(pixel_values)  # (bs, num_image_tokens, vision_feature_dim)
+
+            # 修正：先展平再投影
             projected_image_features = self.vision_projector(
-                image_features.flatten(1, 2))  # (bs, num_image_tokens * hidden_size)
+                image_features.flatten(1))  # (bs, num_image_tokens * hidden_size)
             projected_image_features = projected_image_features.view(batch_size, self.num_image_tokens,
                                                                      self.hidden_size)  # (bs, num_image_tokens, hidden_size)
 
-            # Simple prepend of vision features to token embeddings.
-            # Real VLMs like LLaVA prepend special image tokens (e.g., <image> <image_token_features> <image>).
-            # For this tutorial, we simply prepend the projected features.
             combined_hidden_states = torch.cat((projected_image_features, text_hidden_states), dim=1)
             current_seq_len += self.num_image_tokens
             print(f"--- Bedrock: VLM - Image features prepended. New seq_len: {current_seq_len} ---")
@@ -265,29 +285,30 @@ class BaseLLM(nn.Module):
                     device=attention_mask.device
                 )
                 attention_mask = torch.cat((image_attention_mask, attention_mask), dim=1)
+            else:  # 如果原来没有 attention_mask，但有 VLM 输入，则为 VLM 和文本都创建全 1 mask
+                attention_mask = torch.ones(
+                    batch_size, current_seq_len,
+                    dtype=torch.long,  # Mask 通常是 long/bool
+                    device=input_ids.device
+                )
 
         # 3. Positional Embeddings (Implicitly handled by model design, e.g., RoPE in Attention)
         # For this base model, we assume relative positional encoding or absolute embeddings
         # are handled within the TransformerBlock if needed (e.g., RoPE in Attention).
 
         # 4. Attention Mask for causal language modeling and padding
-        # The attention_mask passed to TransformerBlock is now a padding mask
-        # of shape (batch_size, seq_len). TransformerBlock will convert it to
-        # (batch_size, 1, 1, seq_len) and combine with causal masking.
-        expanded_attention_mask_for_attn = None
-        if attention_mask is not None:
-            # Expand the padding mask from (batch_size, current_seq_len) to (batch_size, 1, 1, current_seq_len)
-            # This is the format expected by F.scaled_dot_product_attention's attn_mask argument.
-            expanded_attention_mask_for_attn = attention_mask[:, None, None,
-                                               :].float()  # Ensure float for multiplication
-            # Convert to attention bias style: -inf for padded positions, 0 for non-padded.
-            expanded_attention_mask_for_attn = (1.0 - expanded_attention_mask_for_attn) * torch.finfo(
-                combined_hidden_states.dtype).min
+        # 修正: 传递 2D attention_mask 给 TransformerBlock
+        # TransformerBlock 内部的 Attention 模块会将其转换为所需的格式
+        # expanded_attention_mask_for_attn = attention_mask # 直接传递 2D mask
+        # 这里的命名为 expanded_attention_mask_for_attn 是因为之前它是 4D 的
+        # 现在它将是 2D 的，且可以直接作为 attention_mask 传递给 TransformerBlock
+        # 在 TransformerBlock 内部的 Attention 模块会进行 4D / key_padding_mask 转换
+        attn_mask_to_pass = attention_mask
 
         # 5. Transformer Blocks
         hidden_states_in_blocks = combined_hidden_states
         for i, layer in enumerate(self.layers):
-            layer_output, layer_aux_losses = layer(hidden_states_in_blocks, expanded_attention_mask_for_attn)
+            layer_output, layer_aux_losses = layer(hidden_states_in_blocks, attn_mask_to_pass)
             hidden_states_in_blocks = layer_output
             aux_losses.update({f"layer_{i}_{k}": v for k, v in layer_aux_losses.items()})
 
