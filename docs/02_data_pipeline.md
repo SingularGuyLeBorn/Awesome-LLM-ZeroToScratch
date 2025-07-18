@@ -20,7 +20,7 @@
 1.  **执行文本数据流水线:**
     此命令将下载、清洗、处理 `wikitext` 数据，并准备用于训练分词器的语料。
     ```bash
-    python data_processing/download_and_reproduce.py text
+    python -m data_processing.download_and_reproduce text
     ```
     此命令将：
     *   下载 `wikitext-2-raw-v1` 数据集到 `./data/raw/wikitext/`。

@@ -2,35 +2,36 @@
 # Bedrock Protocol: Configuration for the VLM pre-training data pipeline.
 
 # --- Dataset Specification ---
-# For this tutorial, we use a small, specific split of COCO to ensure
-# fast and reproducible execution.
-dataset_name: "HuggingFaceM4/COCO"
-# Using a specific split, e.g., Karpathy test split, is good practice.
-# For this script, we'll manually select a tiny subset for the demo.
-num_samples_to_process: 100 # Using a very small number for the demo.
+# 更换为完全公开且易于加载的 COCO 验证集子集
+dataset_name: "nielsr/coco-2017-val" # 纯公共数据集
+# 使用一个较小的样本数进行演示，以确保快速运行
+num_samples_to_process: 500 # 增加到500个样本，更具代表性
 
 # --- Output & Cache Directories ---
 base_output_dir: ./data
 
 # Subdirectory for the raw downloaded dataset.
-raw_data_dir: ${base_output_dir}/raw/coco_demo
+raw_data_dir: ${base_output_dir}/raw/coco_val_demo # 更改目录名以匹配新数据集
 
 # Subdirectory for the processed and cleaned dataset.
-processed_data_dir: ${base_output_dir}/processed/coco_demo
+processed_data_dir: ${base_output_dir}/processed/coco_val_demo # 更改目录名
 
 # --- Data Processing Parameters ---
-# Column names in the dataset.
+# 根据 nielsr/coco-2017-val 数据集调整列名
 image_column: image
-text_column: sentences_raw
+text_column: caption # 该数据集的文本列名为 'caption'
 
 # --- Conceptual Data Distillation ---
-# Parameters for the conceptual GPT-4V data distillation.
-# In a real scenario, you would set 'enabled' to true and provide your API key.
 distillation:
-  enabled: false # Set to true to run the example.
-  # IMPORTANT: Never hardcode API keys. Use environment variables.
-  # The script will look for `OPENAI_API_KEY`.
-  max_prompts: 5 # Limit the number of API calls for this demo.
+  enabled: false # 默认为关闭，防止产生 API 费用
+  max_prompts: 5
   prompt_template: "Provide a detailed, high-quality caption for this image."
 
-# END OF FILE: configs/data/vlm_pretrain.yaml
+# --- VLM 数据增强配置 (概念性) ---
+augmentation:
+  enabled: false # 设置为 true 以启用概念性增强
+  # 例如，你可以添加更多参数来控制未来实际增强的类型和强度
+  # image_transforms: ["random_crop", "color_jitter"]
+  # text_transforms: ["back_translation"]
+
+# END OF FILE : configs/data/vlm_pretrain.yaml

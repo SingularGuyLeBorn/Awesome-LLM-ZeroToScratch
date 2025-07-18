@@ -8,6 +8,7 @@
 # --- 核心深度学习框架 (CPU版本) ---
 torch==2.3.0
 torchvision==0.18.0
+numpy<2.0
 
 # --- Hugging Face 生态系统 (核心) ---
 transformers==4.41.2

@@ -1,40 +1,41 @@
 # FILE: configs/data/text_pretrain.yaml
-# Bedrock Protocol: Configuration for the text pre-training data pipeline.
-# This file centralizes all data-related paths and parameters, embodying
-# the "industrial-grade" config-driven approach.
 
-# --- Dataset Specification ---
-# Hugging Face dataset identifier. Pinned to a specific version for reproducibility.
+# Bedrock 协议：文本预训练数据管道的集中配置文件。
+# 所有与数据相关的路径和超参数都写在这里，体现“工业级”配置即代码的理念。
+# 本文件只关心“数据从哪里来、要存到哪里、怎么加工”，与模型结构无关。
+
+# ── 数据集指定 ───────────────────────────────
+# Hugging Face 上的数据集 ID（含版本号，确保可复现）。
 dataset_name: wikitext
 dataset_config_name: wikitext-2-raw-v1
 
-# --- Output & Cache Directories ---
-# Using absolute paths is recommended in production. Here we use relative paths
-# for portability within the project structure. These paths should ideally point
-# to a network-mounted drive like /root/autodl-tmp on AutoDL.
+# ── 输出与缓存目录 ──────────────────────────
+# 生产环境请用绝对路径，这里用相对路径只是方便在不同机器上开箱即用。
+# 若跑在 AutoDL 等云实例，建议把 base_output_dir 指向 /root/autodl-tmp 这类网络挂载盘。
 base_output_dir: ./data
 
-# Subdirectory for the raw downloaded dataset.
+# 原始数据下载后落盘的位置。
 raw_data_dir: ${base_output_dir}/raw/wikitext-2-raw-v1
 
-# Subdirectory for the processed and cleaned dataset.
+# 清洗/去重/过滤后的正式数据集存放目录。
 processed_data_dir: ${base_output_dir}/processed/wikitext-2-raw-v1
 
-# Subdirectory for the trained tokenizer.
+# 训练好的 SentencePiece 分词器保存路径。
 tokenizer_output_path: ${base_output_dir}/tokenizers/wikitext_spm
 
-# --- Data Processing Parameters ---
-# Text column name in the dataset.
+# ── 数据处理细节 ───────────────────────────
+# Hugging Face 数据集中真正包含文本的列名。
 text_column: text
 
-# --- Tokenizer Training Parameters ---
-# File name for the concatenated text corpus used to train the tokenizer.
+# ── 分词器训练超参数 ────────────────────────
+# 训练分词器时所用“纯文本大文件”的路径（由 processed_data_dir 生成）。
 tokenizer_training_corpus: ${processed_data_dir}/corpus.txt
-vocab_size: 8000 # Smaller vocab for a demo model.
-model_type: unigram # Recommended model type by SentencePiece.
-character_coverage: 1.0 # For English, 1.0 is fine. For multilingual, 0.9995 is common.
+vocab_size: 8000            # 演示用小词表，真正大模型常用 32k/50k/100k。
+model_type: unigram         # SentencePiece 官方推荐，兼顾压缩率与解码速度。
+character_coverage: 1.0     # 英文场景 1.0 即可；多语言场景通常设 0.9995。
 
-# --- 新增的参数，用于测试 ---
-dataset_subset_size: 1000 # 只加载数据集的前1000个样本进行测试
+# ── 调试/快速验证专用 ──────────────────────
+# 如果 >0，则只加载数据集的前 N 条样本，方便冒烟测试；设为 0 就全量加载。
+dataset_subset_size: 1000
 
 # END OF FILE: configs/data/text_pretrain.yaml
