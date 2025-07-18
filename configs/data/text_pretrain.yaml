@@ -34,4 +34,7 @@ vocab_size: 8000 # Smaller vocab for a demo model.
 model_type: unigram # Recommended model type by SentencePiece.
 character_coverage: 1.0 # For English, 1.0 is fine. For multilingual, 0.9995 is common.
 
+# --- 新增的参数，用于测试 ---
+dataset_subset_size: 1000 # 只加载数据集的前1000个样本进行测试
+
 # END OF FILE: configs/data/text_pretrain.yaml

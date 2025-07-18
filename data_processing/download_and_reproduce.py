@@ -29,7 +29,7 @@ def run_text_pipeline(config_path: str) -> None:
     """
     print("--- [Bedrock] Initiating Text Data Pipeline ---")
 
-    with open(config_path, 'r') as f:
+    with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
 
     # Resolve paths
@@ -46,11 +46,29 @@ def run_text_pipeline(config_path: str) -> None:
 
     print(f"1. Loading dataset '{config['dataset_name']}'...")
     # Using a subset for faster demonstration. For full pre-training, remove [:10000]
-    dataset = load_dataset(
-        config['dataset_name'],
-        config['dataset_config_name'],
-        cache_dir=str(raw_data_dir),
-    )
+    # 检查配置中是否有子集大小的设置
+    subset_size = config.get('dataset_subset_size')
+
+    if subset_size and subset_size > 0:
+        print(f"--- [Bedrock] Loading a subset of the dataset: first {subset_size} samples. ---")
+        # 为每个split都加载一个子集
+        dataset = load_dataset(
+            config['dataset_name'],
+            config['dataset_config_name'],
+            split={
+                'train': f'train[:{subset_size}]',
+                'validation': f'validation[:{int(subset_size * 0.1)}]',  # 验证集取10%
+                'test': f'test[:{int(subset_size * 0.1)}]'  # 测试集取10%
+            },
+            cache_dir=str(raw_data_dir),
+        )
+    else:
+        print(f"--- [Bedrock] Loading the full dataset. ---")
+        dataset = load_dataset(
+            config['dataset_name'],
+            config['dataset_config_name'],
+            cache_dir=str(raw_data_dir),
+        )
     print("Dataset loaded successfully.")
 
     print("2. Cleaning and processing text data...")
@@ -93,7 +111,7 @@ def run_vlm_pipeline(config_path: str) -> None:
     """
     print("\n--- [Bedrock] Initiating VLM Data Pipeline ---")
 
-    with open(config_path, 'r') as f:
+    with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
 
     base_output_dir = Path(config['base_output_dir'])
@@ -128,15 +146,20 @@ def run_vlm_pipeline(config_path: str) -> None:
 
 
 if __name__ == "__main__":
-    # Mandate of Zero Ambiguity: The script's purpose is explicit.
-    # It requires a command-line argument to specify which pipeline to run.
-    if len(sys.argv) != 2 or sys.argv not in ["text", "vlm", "all"]:
-        print("Usage: python data_processing/download_and_reproduce.py [text|vlm|all]")
-        sys.exit(1)
+    # 使用 argparse 进行更健壮的命令行参数解析
+    import argparse
+    parser = argparse.ArgumentParser(description="Run the data processing pipeline for Awesome-LLM-ZeroToScratch.")
+    parser.add_argument(
+        "pipeline",
+        type=str,
+        choices=["text", "vlm", "all"],
+        help="The pipeline to run: 'text', 'vlm', or 'all'."
+    )
+    args = parser.parse_args()
 
-    PIPELINE_TO_RUN = sys.argv
+    PIPELINE_TO_RUN = args.pipeline
 
-    # Define paths to config files relative to this script
+    # 定义配置文件的路径
     script_dir = Path(__file__).parent
     project_root = script_dir.parent
     text_config = project_root / "configs/data/text_pretrain.yaml"

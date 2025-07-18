@@ -1,20 +1,21 @@
 # FILE: requirements.txt
-# This file specifies the exact versions of Python packages required for
-# this project, ensuring 100% reproducibility.
-# The versions are chosen for compatibility and stability based on testing.
+# 修正与完善版：确保在GPU服务器上所有功能都能正常运行。
 
-# --- Core Deep Learning Framework ---
+# --- 核心深度学习框架 ---
 # Pinned to a specific CUDA-compatible version.
 torch==2.3.0
+torchvision==0.18.0 # [新增] 与torch版本匹配
 
-# --- Hugging Face Ecosystem ---
+# --- Hugging Face 生态系统 ---
 # The backbone for models, datasets, and training acceleration.
 transformers==4.41.2
 datasets==2.19.0
 accelerate==0.30.1
 tokenizers==0.19.1
+# [新增] TRL (Transformer Reinforcement Learning) 是SFT和DPO训练器必需的核心库
+trl==0.8.6
 
-# --- Distributed Training & Optimization ---
+# --- 分布式训练与优化 ---
 # DeepSpeed for robust large-scale training.
 deepspeed==0.14.2
 # PEFT for parameter-efficient fine-tuning techniques like LoRA.
@@ -25,20 +26,20 @@ peft==0.10.0
 # Quantization library for running models with less memory.
 bitsandbytes==0.43.1
 
-# --- Experiment Tracking ---
+# --- 实验追踪 ---
 # For logging metrics, configurations, and artifacts.
 wandb==0.17.0
 
-# --- Data Processing & Utilities ---
+# --- 数据处理与工具库 ---
 # For training custom tokenizers.
 sentencepiece==0.2.0
 # For language detection during data cleaning.
 fasttext-langdetect==1.0.5
 # For parsing YAML configuration files.
 pyyaml==6.0.1
+Pillow==10.4.0 # [新增] 图像处理库，VLM数据处理时需要
+tqdm==4.66.4 # [新增] 用于显示进度条
 
-# --- Code Quality & Formatting ---
+# --- 代码质量与格式化 ---
 # Used for linting and maintaining code style.
 ruff==0.4.4
-
-# END OF FILE
