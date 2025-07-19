@@ -130,7 +130,6 @@ def run_dpo(config_path: str) -> None:
     print("Initializing DPOTrainer...")
     dpo_trainer = DPOTrainer(
         model,
-        ref_model=None,  # TRL will handle creating the reference model from the base model
         args=training_args,
         train_dataset=dataset,
         tokenizer=tokenizer,

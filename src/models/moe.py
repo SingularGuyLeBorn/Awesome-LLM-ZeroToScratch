@@ -54,75 +54,53 @@ class MoE(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass for the MoE layer.
-
-        Args:
-            x: Input tensor of shape (batch_size, seq_len, hidden_size).
-
-        Returns:
-            Output tensor of shape (batch_size, seq_len, hidden_size).
-            Also returns a dictionary of auxiliary losses, including router load balancing loss.
+        Vectorized and efficient forward pass for the MoE layer.
         """
         batch_size, seq_len, hidden_size = x.size()
-
-        # Step 1: Compute expert probabilities using the router
-        # Flatten the input to (batch_size * seq_len, hidden_size)
         flat_x = x.view(-1, hidden_size)
+        num_tokens = flat_x.shape[0]
 
-        # Router logits: (batch_size * seq_len, num_experts)
         router_logits = self.gate(flat_x)
-
-        # Normalize probabilities across experts for each token
         router_weights = F.softmax(router_logits, dim=-1, dtype=torch.float32).to(x.dtype)
-
-        # Get top-k experts for each token
-        # top_k_weights: (batch_size * seq_len, num_experts_per_tok)
-        # top_k_indices: (batch_size * seq_len, num_experts_per_tok)
         top_k_weights, top_k_indices = torch.topk(router_weights, self.num_experts_per_tok, dim=-1)
-
-        # Normalize top-k weights to sum to 1
         top_k_weights /= top_k_weights.sum(dim=-1, keepdim=True)
 
-        # Step 2: Route tokens to experts and compute expert outputs
-        # Create an empty tensor for the output, which will aggregate expert outputs.
-        output = torch.zeros_like(flat_x)
-
-        # Auxiliary loss for load balancing (Mandate of Proactive Defense for training stability)
-        # We calculate this here, but it's typically added to the main loss in the trainer.
-        # This is a simplified version; real implementations might use more complex functions.
         load_balancing_loss = self._calculate_load_balancing_loss(router_weights, top_k_indices)
 
-        # Prepare to gather expert inputs
-        # expert_inputs will be a list where expert_inputs[i] contains inputs for expert i
-        expert_inputs = [[] for _ in range(self.num_experts)]
-        # expert_indices will store the global indices of tokens assigned to each expert
-        expert_indices = [[] for _ in range(self.num_experts)]
+        final_output = torch.zeros_like(flat_x)
+        
+        # Create a flat list of tokens that are dispatched to experts
+        flat_top_k_indices = top_k_indices.flatten()
+        
+        # Create a mask for combining expert outputs
+        expert_mask = torch.nn.functional.one_hot(top_k_indices, num_classes=self.num_experts).permute(2, 0, 1)
 
-        # Iterate over each token and assign it to its top-k experts
-        for i, token_x in enumerate(flat_x):
-            for k_idx in range(self.num_experts_per_tok):
-                expert_idx = top_k_indices[i, k_idx].item()
-                expert_inputs[expert_idx].append(token_x)
-                expert_indices[expert_idx].append(i)
+        # Loop over experts (this loop is small and acceptable)
+        for expert_idx, expert_layer in enumerate(self.experts):
+            # Find which tokens are routed to this expert
+            # token_indices: a boolean tensor of shape (num_tokens, num_experts_per_tok)
+            token_indices = (top_k_indices == expert_idx)
+            
+            # Get the indices of tokens that go to this expert
+            # selected_tokens: a 1D tensor of indices
+            selected_tokens = token_indices.any(dim=1).nonzero(as_tuple=True)[0]
 
-        # Process each expert in parallel
-        for expert_idx in range(self.num_experts):
-            if expert_inputs[expert_idx]:
-                expert_input_batch = torch.stack(expert_inputs[expert_idx])
-                expert_output = self.experts[expert_idx](expert_input_batch)
+            if selected_tokens.numel() > 0:
+                # Get the corresponding input tokens
+                expert_input = flat_x[selected_tokens]
+                
+                # Pass through the expert
+                expert_output = expert_layer(expert_input)
 
-                # Scatter expert_output back to the original flattened output tensor
-                # Need to multiply by the corresponding top-k weight.
-                for j, global_idx in enumerate(expert_indices[expert_idx]):
-                    # Find the weight for this specific expert and token
-                    # This requires finding where expert_idx is in top_k_indices[global_idx]
-                    local_k_idx = (top_k_indices[global_idx] == expert_idx).nonzero(as_tuple=True)[0]
-                    if local_k_idx.numel() > 0:  # Ensure the expert was indeed one of the top-k
-                        weight = top_k_weights[global_idx, local_k_idx].squeeze()
-                        output[global_idx] += expert_output[j] * weight
+                # Get the weights for these tokens
+                weights = top_k_weights[token_indices]
+                
+                # Weighted sum of expert outputs
+                final_output.index_add_(0, selected_tokens, (expert_output.T * weights).T)
 
-        return output.view(batch_size, seq_len, hidden_size), {
-            "router_aux_loss": load_balancing_loss * self.router_aux_loss_coef}
+        return final_output.view(batch_size, seq_len, hidden_size), {
+            "router_aux_loss": load_balancing_loss * self.router_aux_loss_coef
+        }
 
     def _calculate_load_balancing_loss(self, router_weights: torch.Tensor, top_k_indices: torch.Tensor) -> torch.Tensor:
         """

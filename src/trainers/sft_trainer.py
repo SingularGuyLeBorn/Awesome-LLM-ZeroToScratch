@@ -131,7 +131,7 @@ def run_sft(config_path: str) -> None:
         dataset_text_field=config['dataset_text_field'],
         max_seq_length=config['max_seq_length'],
         args=training_args,
-        packing=False,  # Set to True for more efficient packing of short examples into longer sequences.
+        packing=True,  # Set to True for more efficient packing of short examples into longer sequences.
         # Can provide better throughput but might complicate dataset debugging.
     )
 

@@ -102,4 +102,7 @@ venv.bak/
 *.model
 *.vocab
 
+
+.gemini.env
+
 # END OF FILE: .gitignore

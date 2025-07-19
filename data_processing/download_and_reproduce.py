@@ -70,28 +70,42 @@ def run_text_pipeline(config_path: str) -> None:
     logger.info(f"分词器输出前缀已准备: {tokenizer_output_prefix}")
 
     logger.info(f"1. 正在加载数据集 '{config['dataset_name']}'...")
+    # --- 健壮的数据集加载和子集选择逻辑 ---
+    # 首先，加载数据集的元信息来检查可用的分割
+    full_dataset = load_dataset(
+        config['dataset_name'],
+        config['dataset_config_name'],
+        cache_dir=str(raw_data_dir),
+    )
+    logger.info(f"完整数据集包含以下分割: {list(full_dataset.keys())}")
+
     # 从配置文件获取数据集子集大小。如果为0或未指定，则加载整个数据集。
     subset_size = config.get('dataset_subset_size')
 
     if subset_size is not None and subset_size > 0:
-        logger.info(f"--- [基石] 正在加载数据集的子集: 前 {subset_size} 个样本。 ---")
-        dataset = load_dataset(
-            config['dataset_name'],
-            config['dataset_config_name'],
-            split={
-                'train': f'train[:{subset_size}]',
-                'validation': f'validation[:{int(subset_size * 0.1)}]',
-                'test': f'test[:{int(subset_size * 0.1)}]'
-            },
-            cache_dir=str(raw_data_dir),  # datasets 库的 cache_dir 参数需要字符串
-        )
+        logger.info(f"--- [基石] 正在为所有可用分割加载子集: 前 {subset_size} 个样本。 ---")
+        
+        processed_splits = {}
+        for split_name, split_dataset in full_dataset.items():
+            # 为每个分割选择子集
+            # 为了保持分割间的比例，可以为验证集和测试集选择更小的子集
+            if split_name == 'train':
+                size = subset_size
+            else: # validation, test, etc.
+                size = int(subset_size * 0.1) if int(subset_size * 0.1) > 0 else 1
+            
+            # 确保请求的样本数不超过该分割的总样本数
+            if size > len(split_dataset):
+                logger.warning(f"请求的子集大小 {size} 大于 '{split_name}' 分割的可用样本数 {len(split_dataset)}。将使用所有可用样本。")
+                size = len(split_dataset)
+            
+            processed_splits[split_name] = split_dataset.select(range(size))
+        
+        dataset = DatasetDict(processed_splits)
+        logger.info(f"子集加载完成，包含分割: {list(dataset.keys())}")
     else:
-        logger.info(f"--- [基石] 正在加载完整数据集。 ---")
-        dataset = load_dataset(
-            config['dataset_name'],
-            config['dataset_config_name'],
-            cache_dir=str(raw_data_dir),
-        )
+        logger.info(f"--- [基石] 正在使用完整数据集。 ---")
+        dataset = full_dataset
     logger.info("数据集加载成功。")
 
     logger.info("2. 正在进行文本清洗和质量过滤...")
@@ -159,30 +173,38 @@ def run_vlm_pipeline(config_path: str) -> None:
     processed_data_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"VLM 数据输出目录已准备: {processed_data_dir}")
 
-    # --- VLM 数据下载和初始加载逻辑 ---
+    # --- 健壮的 VLM 数据集加载和子集选择逻辑 ---
     dataset_name = config['dataset_name']
+    logger.info(f"1. 正在加载数据集 '{dataset_name}'...")
+
+    # 首先，加载数据集的元信息来检查可用的分割
+    full_dataset = load_dataset(
+        dataset_name,
+        cache_dir=str(raw_data_dir),
+    )
+    logger.info(f"完整数据集包含以下分割: {list(full_dataset.keys())}")
+
     # 从配置文件获取 num_samples_to_process。如果为0或未指定，则加载整个数据集。
     num_samples_to_process = config.get("num_samples_to_process")
 
-    logger.info(f"1. 正在加载数据集 '{dataset_name}'...")
-
-    # 直接使用 datasets.load_dataset 从 Hugging Face Hub 加载 VLM 数据
     if num_samples_to_process is not None and num_samples_to_process > 0:
-        logger.info(f"--- [基石] 正在加载数据集的子集: 前 {num_samples_to_process} 个样本。 ---")
-        # lmms-lab/COCO-Caption2017 数据集目前只有一个 'train' 分割
-        dataset = load_dataset(
-            dataset_name,
-            split=f'train[:{num_samples_to_process}]',
-            cache_dir=str(raw_data_dir),  # datasets 库的 cache_dir 参数需要字符串
-        )
+        logger.info(f"--- [基石] 正在为所有可用分割加载子集: 前 {num_samples_to_process} 个样本。 ---")
+        
+        processed_splits = {}
+        for split_name, split_dataset in full_dataset.items():
+            # 确保请求的样本数不超过该分割的总样本数
+            size = num_samples_to_process
+            if size > len(split_dataset):
+                logger.warning(f"请求的子集大小 {size} 大于 '{split_name}' 分割的可用样本数 {len(split_dataset)}。将使用所有可用样本。")
+                size = len(split_dataset)
+            
+            processed_splits[split_name] = split_dataset.select(range(size))
+        
+        dataset = DatasetDict(processed_splits)
+        logger.info(f"子集加载完成，包含分割: {list(dataset.keys())}")
     else:
-        logger.info(f"--- [基石] 正在加载完整数据集。 ---")
-        # lmms-lab/COCO-Caption2017 数据集目前只有一个 'train' 分割，所以直接指定 split='train'
-        dataset = load_dataset(
-            dataset_name,
-            split='train',
-            cache_dir=str(raw_data_dir),
-        )
+        logger.info(f"--- [基石] 正在使用完整数据集。 ---")
+        dataset = full_dataset
     logger.info("数据集加载成功。")
     # --- VLM 数据下载和初始加载逻辑结束 ---
 

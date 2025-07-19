@@ -286,7 +286,7 @@ def run_pretrain(config_path: str) -> None:
 
             # Backward pass and optimization
             # Mandate of Proactive Defense: Gradient accumulation handled by accelerator.
-            accelerator.backward(loss / config['gradient_accumulation_steps'])
+            accelerator.backward(loss)
 
             if (step + 1) % config['gradient_accumulation_steps'] == 0 or \
                     (step + 1) == len(train_dataloader):  # Last batch in epoch

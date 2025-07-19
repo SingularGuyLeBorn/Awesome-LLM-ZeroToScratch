@@ -193,14 +193,11 @@ class BaseLLM(nn.Module):
                                                      num_image_tokens=self.num_image_tokens)
 
             # The projector maps vision features to the language model's hidden_size
+            # Correct Implementation: Project each image token feature independently.
             self.vision_projector = nn.Sequential(
-                # 修正：输入维度为 (vision_feature_dim * num_image_tokens)
-                nn.Linear(vision_feature_dim * self.num_image_tokens,
-                          config.get("vision_projector_hidden_size", self.hidden_size * 2)),
+                nn.Linear(vision_feature_dim, self.hidden_size),
                 nn.SiLU(),
-                nn.Linear(config.get("vision_projector_hidden_size", self.hidden_size * 2),
-                          self.hidden_size * self.num_image_tokens)
-                # Project to match total tokens in text embed dimension
+                nn.Linear(self.hidden_size, self.hidden_size)
             )
             print("--- Bedrock: Vision Encoder Initialized (Conceptual) ---")
 
@@ -267,11 +264,10 @@ class BaseLLM(nn.Module):
             # Mandate of Proactive Defense: Ensure vision data is correctly processed.
             image_features = self.vision_encoder(pixel_values)  # (bs, num_image_tokens, vision_feature_dim)
 
-            # 修正：先展平再投影
-            projected_image_features = self.vision_projector(
-                image_features.flatten(1))  # (bs, num_image_tokens * hidden_size)
-            projected_image_features = projected_image_features.view(batch_size, self.num_image_tokens,
-                                                                     self.hidden_size)  # (bs, num_image_tokens, hidden_size)
+            # Correct Usage: Apply the projector to each image token feature.
+            # image_features is (bs, num_image_tokens, vision_feature_dim)
+            # projected_image_features will be (bs, num_image_tokens, hidden_size)
+            projected_image_features = self.vision_projector(image_features)
 
             combined_hidden_states = torch.cat((projected_image_features, text_hidden_states), dim=1)
             current_seq_len += self.num_image_tokens

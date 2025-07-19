@@ -43,3 +43,15 @@ tqdm==4.66.4 # [新增] 用于显示进度条
 # --- 代码质量与格式化 ---
 # Used for linting and maintaining code style.
 ruff==0.4.4
+
+# --- 推理与服务 ---
+# High-performance web framework for serving models.
+fastapi==0.111.0
+# ASGI server for FastAPI.
+uvicorn==0.29.0
+# For creating a command-line interface.
+jsonargparse==4.27.2
+
+# --- Testing ---
+# Industry-standard testing framework.
+pytest==8.2.2
