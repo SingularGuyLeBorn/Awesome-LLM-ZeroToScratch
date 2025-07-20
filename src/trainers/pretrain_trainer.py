@@ -157,7 +157,8 @@ def run_pretrain(config_path: str) -> None:
                     attention_mask=batch['attention_mask'],
                     labels=batch['input_ids']
                 )
-                loss = outputs['loss']
+                # **关键**: 从标准的 ModelOutput 对象中获取 loss
+                loss = outputs.loss
 
                 accelerator.backward(loss)
                 optimizer.step()
@@ -180,10 +181,8 @@ def run_pretrain(config_path: str) -> None:
                     unwrapped_model = accelerator.unwrap_model(model)
 
                     if accelerator.is_main_process:
-                        # **最终解决方案**: 采用 `safe_serialization=False` 来保证在任何环境下都能成功保存。
-                        # 这是解决顽固的环境/库 bug 的最直接有效的方法。
-                        print(f"Saving checkpoint at step {completed_steps} using safe_serialization=False...")
-                        unwrapped_model.save_pretrained(str(output_path), safe_serialization=False)
+                        # 现在模型自身就是一致的，可以直接用默认方式保存
+                        unwrapped_model.save_pretrained(str(output_path))
                         tokenizer.save_pretrained(str(output_path))
                         print(f"Checkpoint saved at step {completed_steps} to {output_path}")
 
@@ -195,9 +194,8 @@ def run_pretrain(config_path: str) -> None:
         accelerator.wait_for_everyone()
         unwrapped_model = accelerator.unwrap_model(model)
 
-        # 同样，在最终保存时也使用 `safe_serialization=False`
-        print(f"Saving final model to {final_model_path} using safe_serialization=False...")
-        unwrapped_model.save_pretrained(str(final_model_path), safe_serialization=False)
+        # 同样，直接保存即可
+        unwrapped_model.save_pretrained(str(final_model_path))
         tokenizer.save_pretrained(str(final_model_path))
         print(f"Final model and tokenizer saved to {final_model_path}")
         if config.get('report_to') == "wandb":

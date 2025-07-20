@@ -11,9 +11,11 @@ configurable via a dictionary, adhering to the "industrial-grade" principle.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple, List
 
 from transformers import PreTrainedModel, PretrainedConfig
+from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.generation import GenerationMixin
 
 from src.models.attention.standard_attention import StandardAttention
 from src.models.attention.flash_attention import FlashAttention
@@ -36,11 +38,8 @@ class BaseLLMConfig(PretrainedConfig):
             attention_type="standard",
             model_type_llm="DenseLLM",
             tie_word_embeddings=True,
-            # +++ START OF CRITICAL FIX FOR GENERATE() COMPATIBILITY +++
-            # 明确声明这是一个解码器模型，且不是编码器-解码器模型
             is_decoder=True,
             is_encoder_decoder=False,
-            # +++ END OF CRITICAL FIX FOR GENERATE() COMPATIBILITY +++
             # MoE Params
             num_experts=8,
             num_experts_per_tok=2,
@@ -67,8 +66,8 @@ class BaseLLMConfig(PretrainedConfig):
         self.num_image_tokens = num_image_tokens
         self.vision_encoder_output_dim = vision_encoder_output_dim
 
-        # 将 is_decoder 和 is_encoder_decoder 传递给基类
-        super().__init__(tie_word_embeddings=tie_word_embeddings, is_decoder=is_decoder, is_encoder_decoder=is_encoder_decoder, **kwargs)
+        super().__init__(tie_word_embeddings=tie_word_embeddings, is_decoder=is_decoder,
+                         is_encoder_decoder=is_encoder_decoder, **kwargs)
 
 
 class VisionEncoderDummy(nn.Module):
@@ -134,8 +133,10 @@ class TransformerBlock(nn.Module):
         return hidden_states, aux_loss_dict
 
 
-class BaseLLM(PreTrainedModel):
+class BaseLLM(PreTrainedModel, GenerationMixin):
     config_class = BaseLLMConfig
+    _no_split_modules = ["TransformerBlock"]
+    main_input_name = "input_ids"
 
     def __init__(self, config: BaseLLMConfig):
         super().__init__(config)
@@ -158,7 +159,6 @@ class BaseLLM(PreTrainedModel):
         self.lm_head = nn.Linear(self.hidden_size, self.vocab_size, bias=False)
 
         self.post_init()
-        self.tie_weights()
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -172,8 +172,36 @@ class BaseLLM(PreTrainedModel):
     def set_output_embeddings(self, new_embeddings):
         self.lm_head = new_embeddings
 
-    def forward(self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None,
-                pixel_values: Optional[torch.Tensor] = None, labels: Optional[torch.Tensor] = None):
+    def prepare_inputs_for_generation(self, input_ids: torch.LongTensor, **kwargs) -> Dict[str, Any]:
+        """
+        Prepares model inputs for the next generation step. This is a crucial method
+        for compatibility with the .generate() function.
+        """
+        # We only need to pass the `input_ids` and `attention_mask`.
+        # For models with KV caching, this method would also handle `past_key_values`.
+        model_inputs = {"input_ids": input_ids}
+
+        # The `generate` method passes the `attention_mask` inside `kwargs`.
+        # We need to extract it and include it in the returned dictionary.
+        model_inputs["attention_mask"] = kwargs.get("attention_mask", None)
+
+        return model_inputs
+
+    # <<< START OF MODIFIED SECTION >>>
+    def forward(
+            self,
+            input_ids: torch.LongTensor,
+            attention_mask: Optional[torch.Tensor] = None,
+            pixel_values: Optional[torch.Tensor] = None,
+            past_key_values: Optional[List[torch.Tensor]] = None,
+            labels: Optional[torch.LongTensor] = None,
+            use_cache: Optional[bool] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
+    ) -> CausalLMOutputWithPast:
+        # <<< END OF MODIFIED SECTION >>>
+
         batch_size, seq_len = input_ids.size()
         aux_losses = {}
         text_hidden_states = self.embed_tokens(input_ids)
@@ -220,4 +248,10 @@ class BaseLLM(PreTrainedModel):
             else:
                 loss = total_aux_loss
 
-        return {"loss": loss, "logits": logits, "aux_losses": aux_losses}
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=None,
+            hidden_states=None,
+            attentions=None,
+        )

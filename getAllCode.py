@@ -87,7 +87,7 @@ if __name__ == '__main__':
     source_folder = '.'  # '.' 表示当前脚本所在的文件夹
 
     # 2. 设置要查找的文件后缀名列表
-    file_extensions = ['.md', '.py', 'sh', 'yaml', 'yml', 'txt']
+    file_extensions = ['.py', 'sh', 'yaml', 'yml']
 
     # 3. 设置输出的 TXT 文件名
     output_file = 'merged_multiple_contents_custom_exclude.txt'
