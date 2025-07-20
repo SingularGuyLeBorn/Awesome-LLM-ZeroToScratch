@@ -9,7 +9,7 @@ model_type: "DenseLLM" # Custom identifier for our internal model builder
 vocab_size: 32000          # Vocabulary size. Should match your tokenizer.
 hidden_size: 1024          # Dimensionality of the embeddings and Transformer blocks (d_model).
 intermediate_size: 4096    # Dimensionality of the feed-forward layer (d_ffn). Typically 4 * hidden_size.
-num_hidden_layers: 24      # Number of Transformer blocks (L).
+num_hidden_layers: 4      # Number of Transformer blocks (L).
 num_attention_heads: 16    # Number of attention heads (h). hidden_size must be divisible by num_attention_heads.
 num_key_value_heads: 16    # For Multi-Head Attention (MHA), this is equal to num_attention_heads.
                              # For Grouped-Query Attention (GQA), it's a smaller number.

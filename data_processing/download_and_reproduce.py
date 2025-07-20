@@ -1,3 +1,4 @@
+
 # FILE: data_processing/download_and_reproduce.py
 """
 基石协议：数据管道执行主脚本。
@@ -12,14 +13,11 @@ import sys
 import os
 from pathlib import Path
 import yaml
-from datasets import load_dataset, concatenate_datasets, Dataset  # 导入 Dataset 类
+from datasets import load_dataset, concatenate_datasets, Dataset, DatasetDict  # 导入 Dataset 类
 import logging
 import datetime
 import shutil  # 导入 shutil 模块用于文件操作
-# import json  # 导入 json 模块用于解析 COCO json (原先用于手动处理，现在已由 datasets 库处理，故不再直接使用)
 from PIL import Image  # 导入 Image 用于图像加载
-
-# from huggingface_hub import snapshot_download  # 导入 snapshot_download (对于数据集现在推荐直接使用 load_dataset，故不再直接使用)
 
 # 配置日志
 log_dir = Path("./logs")
@@ -54,14 +52,15 @@ def run_text_pipeline(config_path: str) -> None:
         config = yaml.safe_load(f)
     logger.info(f"已加载配置文件: {config_path}")
 
-    # 解析路径
+    # --- 路径解析（已修正，严格遵循配置文件） ---
     base_output_dir = Path(config['base_output_dir'])
-    # 对于文本数据集，通常 dataset_name 就是 raw 和 processed 目录的一部分
-    raw_data_dir = base_output_dir / 'raw' / config['dataset_name']
-    processed_data_dir = base_output_dir / 'processed' / config['dataset_name']
-    tokenizer_corpus_path = processed_data_dir / "corpus.txt"
-    tokenizer_output_prefix = base_output_dir / 'tokenizers' / config['dataset_name'] / Path(
-        config['dataset_name']).name
+
+    # 使用字符串替换来处理配置文件中的 ${variable} 占位符
+    raw_data_dir = Path(config['raw_data_dir'].replace('${base_output_dir}', str(base_output_dir)))
+    processed_data_dir = Path(config['processed_data_dir'].replace('${base_output_dir}', str(base_output_dir)))
+    tokenizer_output_prefix = Path(config['tokenizer_output_path'].replace('${base_output_dir}', str(base_output_dir)))
+    tokenizer_corpus_path = Path(
+        config['tokenizer_training_corpus'].replace('${processed_data_dir}', str(processed_data_dir)))
 
     # 确保输出目录存在
     processed_data_dir.mkdir(parents=True, exist_ok=True)
@@ -84,23 +83,24 @@ def run_text_pipeline(config_path: str) -> None:
 
     if subset_size is not None and subset_size > 0:
         logger.info(f"--- [基石] 正在为所有可用分割加载子集: 前 {subset_size} 个样本。 ---")
-        
+
         processed_splits = {}
         for split_name, split_dataset in full_dataset.items():
             # 为每个分割选择子集
             # 为了保持分割间的比例，可以为验证集和测试集选择更小的子集
             if split_name == 'train':
                 size = subset_size
-            else: # validation, test, etc.
+            else:  # validation, test, etc.
                 size = int(subset_size * 0.1) if int(subset_size * 0.1) > 0 else 1
-            
+
             # 确保请求的样本数不超过该分割的总样本数
             if size > len(split_dataset):
-                logger.warning(f"请求的子集大小 {size} 大于 '{split_name}' 分割的可用样本数 {len(split_dataset)}。将使用所有可用样本。")
+                logger.warning(
+                    f"请求的子集大小 {size} 大于 '{split_name}' 分割的可用样本数 {len(split_dataset)}。将使用所有可用样本。")
                 size = len(split_dataset)
-            
+
             processed_splits[split_name] = split_dataset.select(range(size))
-        
+
         dataset = DatasetDict(processed_splits)
         logger.info(f"子集加载完成，包含分割: {list(dataset.keys())}")
     else:
@@ -189,17 +189,18 @@ def run_vlm_pipeline(config_path: str) -> None:
 
     if num_samples_to_process is not None and num_samples_to_process > 0:
         logger.info(f"--- [基石] 正在为所有可用分割加载子集: 前 {num_samples_to_process} 个样本。 ---")
-        
+
         processed_splits = {}
         for split_name, split_dataset in full_dataset.items():
             # 确保请求的样本数不超过该分割的总样本数
             size = num_samples_to_process
             if size > len(split_dataset):
-                logger.warning(f"请求的子集大小 {size} 大于 '{split_name}' 分割的可用样本数 {len(split_dataset)}。将使用所有可用样本。")
+                logger.warning(
+                    f"请求的子集大小 {size} 大于 '{split_name}' 分割的可用样本数 {len(split_dataset)}。将使用所有可用样本。")
                 size = len(split_dataset)
-            
+
             processed_splits[split_name] = split_dataset.select(range(size))
-        
+
         dataset = DatasetDict(processed_splits)
         logger.info(f"子集加载完成，包含分割: {list(dataset.keys())}")
     else:

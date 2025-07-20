@@ -6,10 +6,10 @@
 seed: 42
 output_dir: "./checkpoints/pretrain_llm_demo"
 # Checkpoint interval. Set to -1 to only save at the end.
-save_steps: 1000
+save_steps: 1
 logging_steps: 10
-eval_steps: 1000 # Evaluate every X steps.
-max_steps: 50000 # Total training steps. Set to -1 to train for num_train_epochs.
+eval_steps: 10 # Evaluate every X steps.
+max_steps: 10 # Total training steps. Set to -1 to train for num_train_epochs.
 num_train_epochs: -1 # If max_steps > 0, this is ignored. Set to 1 for a quick demo epoch.
 
 # --- Model Configuration ---

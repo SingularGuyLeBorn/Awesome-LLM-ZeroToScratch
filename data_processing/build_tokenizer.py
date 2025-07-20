@@ -15,14 +15,15 @@ import re
 import logging  # 导入 logging 模块
 import shutil  # 用于文件复制
 import json  # 用于生成 JSON 配置
-from transformers import PreTrainedTokenizerFast, AutoTokenizer
+import sys  # 修正: 导入 sys
+from transformers import PreTrainedTokenizerFast, AutoTokenizer, LlamaTokenizerFast
 
 # 修正: 配置日志, 确保脚本独立运行时也能正常输出
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(sys.stdout) # 默认输出到控制台
+        logging.StreamHandler(sys.stdout)  # 默认输出到控制台
     ]
 )
 # 获取日志器
@@ -65,7 +66,7 @@ def train_tokenizer(
         match = re.search(r'Please set it to a value <= (\d+)', str(e))
         if match:
             suggested_vocab_size = int(match.group(1))
-            logger.info(f"--- [Bedrock] 正在尝试使用建议词汇量: {suggested_vocab_size} ---")
+            logger.info(f"--- [Bedrock] 正在尝试使用建议词汇量: {suggested_vocab_size}")
 
             try:
                 _run_sentencepiece_training(str(output_path_prefix), str(corpus_path), suggested_vocab_size, model_type,
@@ -80,159 +81,40 @@ def train_tokenizer(
     logger.info("\n--- [Bedrock] SentencePiece 训练完成 ---")
 
     # --- 保存为 Hugging Face Transformers 格式 (最新的鲁棒逻辑) ---
-    # 这个逻辑旨在直接生成 HF 格式所需的文件，而不是依赖 PreTrainedTokenizerFast 成功加载原始 .model 文件
     logger.info(f"--- [Bedrock] 正在生成 Hugging Face 分词器文件... ---")
     hf_tokenizer_output_dir = output_dir / f"{output_path_prefix.name}_hf"
     hf_tokenizer_output_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Hugging Face 分词器目标目录: {hf_tokenizer_output_dir}")
 
-    # 获取 SentencePiece 生成的 .model 和 .vocab 文件的完整路径
     spm_model_file = output_path_prefix.with_suffix('.model')
-    spm_vocab_file = output_path_prefix.with_suffix('.vocab')
 
     try:
-        # 1. 复制 SentencePiece 生成的 .model 和 .vocab 文件到 Hugging Face 输出目录
-        shutil.copy(spm_model_file, hf_tokenizer_output_dir / spm_model_file.name)
-        shutil.copy(spm_vocab_file, hf_tokenizer_output_dir / spm_vocab_file.name)
-        logger.info(f"已复制 SentencePiece 模型文件 ({spm_model_file.name}) 和词汇表文件 ({spm_vocab_file.name})。")
+        # 修正：直接使用 LlamaTokenizerFast 加载 .model 文件，这是最稳健的方式
+        # 它会正确生成所有必要的文件，包括 tokenizer.json
+        logger.info(f"尝试使用 LlamaTokenizerFast 直接从 '{spm_model_file}' 加载...")
+        tokenizer = LlamaTokenizerFast(vocab_file=str(spm_model_file))
 
-        # 2. 创建 tokenizer_config.json
-        # 这是告诉 AutoTokenizer 如何理解这个分词器的元数据文件
-        tokenizer_config = {
-            "model_max_length": 1024,  # 这是一个合理的默认值，可以根据你的模型配置调整
-            "pad_token": "[PAD]",
-            "eos_token": "[EOS]",
-            "bos_token": "[BOS]",
-            "unk_token": "[UNK]",
-            "model_type": model_type,  # 使用训练时的模型类型 (e.g., "unigram")
-            "vocab_size": vocab_size,  # 使用训练时的词汇量
-            "tokenizer_class": "LlamaTokenizerFast" if model_type == "unigram" else f"{model_type.capitalize()}TokenizerFast",
-            # 尝试根据类型设置 class
-            "name_or_path": str(hf_tokenizer_output_dir),  # 指向自身目录，方便 AutoTokenizer 加载
-        }
-        with open(hf_tokenizer_output_dir / "tokenizer_config.json", "w", encoding="utf-8") as f:
-            json.dump(tokenizer_config, f, ensure_ascii=False, indent=2)
-        logger.info(f"已创建 tokenizer_config.json。")
-
-        # 3. 尝试通过 AutoTokenizer 从复制过来的文件加载并重新保存为标准 HF 格式
-        # 这一步旨在生成完整的 tokenizer.json，它内部会解析 .model 文件
-        try:
-            temp_tokenizer = AutoTokenizer.from_pretrained(
-                str(hf_tokenizer_output_dir),
-                trust_remote_code=True,
-                use_fast=True,
-            )
-            logger.info("已通过 AutoTokenizer 成功加载临时分词器。")
-
-            # 确保特殊 token 被正确设置
-            if add_special_tokens:
-                special_tokens_dict = {}
-                # 仅当 token 不存在时才添加，避免警告
-                if temp_tokenizer.bos_token is None: special_tokens_dict['bos_token'] = '[BOS]'
-                if temp_tokenizer.eos_token is None: special_tokens_dict['eos_token'] = '[EOS]'
-                if temp_tokenizer.unk_token is None: special_tokens_dict['unk_token'] = '[UNK]'
-                if temp_tokenizer.pad_token is None: special_tokens_dict['pad_token'] = '[PAD]'
-
-                if special_tokens_dict:
-                    temp_tokenizer.add_special_tokens(special_tokens_dict)
-                    logger.info(f"已为临时分词器添加特殊 token: {list(special_tokens_dict.keys())}")
-
-            if temp_tokenizer.pad_token is None and temp_tokenizer.eos_token is not None:
-                temp_tokenizer.pad_token = temp_tokenizer.eos_token
-                logger.info(f"已设置临时分词器的 pad_token 为 eos_token。")
-
-            temp_tokenizer.save_pretrained(str(hf_tokenizer_output_dir))
-            logger.info(f"Hugging Face 格式分词器已成功保存到: {hf_tokenizer_output_dir}")
-
-        except Exception as inner_e:
-            logger.warning(
-                f"警告：尝试通过 AutoTokenizer 加载并重新保存分词器失败，将尝试手动构建 tokenizer.json。错误详情: {inner_e}")
-            # 如果 AutoTokenizer 加载失败，回退到手动构建 tokenizer.json，直接引用 SentencePiece 模型文件
-            # 这种方法不涉及在构建时直接解析 .model 文件到 Tokenizer 对象
-            tokenizer_json_content = {
-                "version": "1.0",
-                "normalizer": {
-                    "type": "Sequence",
-                    "normalizers": [
-                        {"type": "Replace", "pattern": " ", "content": " "},
-                        {"type": "Strip", "left": False, "right": True}
-                    ]
-                },
-                "pre_tokenizer": {
-                    "type": "Sequence",
-                    "pre_tokenizers": [
-                        {"type": "Split", "pattern": {"String": " ", "SplitMode": "Contiguous"},
-                         "add_prefix_space": False},
-                        {"type": "Punctuation"}
-                    ]
-                },
-                "model": {
-                    "type": "WordPiece" if model_type == "bpe" else "SentencePiece",
-                    "files": str(spm_model_file.name),  # 直接引用复制的 .model 文件名
-                    "vocab": str(spm_vocab_file.name),  # 直接引用复制的 .vocab 文件名
-                },
-                "decoder": {
-                    "type": "Sequence",
-                    "decoders": [
-                        {"type": "ByteFallback"},
-                        {"type": "Replace", "pattern": " ", "content": " "}
-                    ]
-                },
-                "post_processor": None,
-                "token_to_id": {},
-                "id_to_token": [],
-                "added_tokens": [
-                    {"id": 0, "content": "[PAD]", "single_word": False, "lstrip": False, "rstrip": False,
-                     "normalized": True},
-                    {"id": 1, "content": "[UNK]", "single_word": False, "lstrip": False, "rstrip": False,
-                     "normalized": True},
-                    {"id": 2, "content": "[BOS]", "single_word": False, "lstrip": False, "rstrip": False,
-                     "normalized": True},
-                    {"id": 3, "content": "[EOS]", "single_word": False, "lstrip": False, "rstrip": False,
-                     "normalized": True},
-                    {"id": 4, "content": "<0x0A>", "single_word": False, "lstrip": False, "rstrip": False,
-                     "normalized": True}  # 换行符
-                ],
-                "padding": {
-                    "direction": "right",
-                    "pad_id": 0,
-                    "pad_type_id": 0,
-                    "pad_token": "[PAD]",
-                    "length": None  # 可以在模型加载时根据 model_max_length 设置
-                },
-                "truncation": {
-                    "max_length": tokenizer_config["model_max_length"],
-                    "strategy": "longest_first",
-                    "direction": "right"
-                }
+        # 确保特殊 token 被正确设置
+        if add_special_tokens:
+            special_tokens_dict = {
+                'bos_token': '[BOS]',
+                'eos_token': '[EOS]',
+                'unk_token': '[UNK]',
+                'pad_token': '[PAD]'
             }
+            tokenizer.add_special_tokens(special_tokens_dict)
+            logger.info(f"已为分词器添加特殊 token: {list(special_tokens_dict.keys())}")
 
-            # 从 .vocab 文件读取实际的 token_to_id 和 id_to_token
-            # 注意：如果 SentencePiece 的 .model 文件本身包含所有信息，这一步可能不是必需的
-            # 但为了鲁棒性，我们依然解析 .vocab 文件
-            # 确保特殊 token 的 ID 与 added_tokens 保持一致
-            id_to_piece = {t["id"]: t["content"] for t in tokenizer_json_content["added_tokens"]}
-            piece_to_id = {t["content"]: t["id"] for t in tokenizer_json_content["added_tokens"]}
+        if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+            logger.info(f"已设置分词器的 pad_token 为 eos_token。")
 
-            with open(spm_vocab_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    piece, score = line.strip().split('\t')
-                    if piece not in piece_to_id:  # 避免覆盖特殊 token
-                        id_to_piece[len(id_to_piece)] = piece  # 暂时用连续 ID
-                        piece_to_id[piece] = len(piece_to_id)  # 暂时用连续 ID
-
-            # 将 ID 和 Piece 映射回 tokenizer_json_content
-            # 先清空，再重新构建
-            tokenizer_json_content["token_to_id"] = piece_to_id
-            tokenizer_json_content["id_to_token"] = [id_to_piece[i] for i in sorted(id_to_piece.keys())]
-
-            with open(hf_tokenizer_output_dir / "tokenizer.json", "w", encoding="utf-8") as f:
-                json.dump(tokenizer_json_content, f, ensure_ascii=False, indent=2)
-            logger.info(f"已通过手动构建 tokenizer.json 成功保存分词器到: {hf_tokenizer_output_dir}")
+        # 保存为 Hugging Face 格式
+        tokenizer.save_pretrained(str(hf_tokenizer_output_dir))
+        logger.info(f"Hugging Face 格式分词器已成功保存到: {hf_tokenizer_output_dir}")
 
     except Exception as e:
         logger.error(f"致命错误: 尝试生成 Hugging Face 分词器文件失败。错误详情: {e}")
-        logger.error(f"请检查文件 {spm_model_file} 和 {spm_vocab_file} 是否有效，并确保目标目录可写。")
         return
 
 
@@ -300,3 +182,5 @@ if __name__ == "__main__":
         character_coverage=args.character_coverage,
         add_special_tokens=args.add_special_tokens
     )
+
+# END OF FILE: data_processing/build_tokenizer.py
