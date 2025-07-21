@@ -1,0 +1,55 @@
+# FILE: configs/training/finetune_ppo.yaml
+# Bedrock Protocol: Configuration for Proximal Policy Optimization (PPO).
+# MODIFIED FOR CPU-ONLY EXECUTION
+
+# --- Model & Tokenizer ---
+model_name_or_path: "./checkpoints/sft-tinyllama-guanaco-cpu/final_model" # Points to the CPU-trained adapter
+use_fast_tokenizer: true
+
+# --- Dataset ---
+dataset_name: "lvwerra/stack-exchange-paired"
+dataset_text_field: "question"
+dataset_subset_size: 100 # Reduced for quicker CPU run
+
+# --- PPO Specific Parameters (TRL PPOConfig) ---
+ppo_steps: 200 # Reduced for CPU run
+learning_rate: 1e-5
+batch_size: 1 # [MODIFIED] Batch size per device for collected experiences.
+ppo_mini_batch_size: 1
+gradient_accumulation_steps: 4
+ppo_epochs: 4
+init_kl_coef: 0.2
+target_kl: 0.05
+adap_kl_ctrl: true
+
+# --- Generation Parameters for PPO Rollouts ---
+max_new_tokens: 64 # Reduced for CPU run
+min_output_length: 16
+max_output_length: 128
+
+# --- General Training & Experiment Tracking ---
+output_dir: "./checkpoints/ppo-tinyllama-guanaco-cpu" # Changed output dir
+seed: 42
+bf16: false # [MODIFIED] Disabled for CPU
+fp16: false # [MODIFIED] Disabled for CPU
+max_grad_norm: 1.0
+
+# --- PEFT Configuration (LoRA for PPO Actor) ---
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_modules:
+  - "q_proj"
+  - "k_proj"
+  - "v_proj"
+  - "o_proj"
+
+# --- Conceptual PPO Loop Control ---
+ppo_epochs_conceptual: 1
+ppo_num_batches_conceptual: 5 # Reduced for CPU run
+
+# --- Experiment Tracking ---
+report_to: "none" # Set to "none" for quick CPU test runs.
+run_name: "ppo-tinyllama-guanaco-demo-cpu"
+
+# END OF FILE: configs/training/finetune_ppo.yaml

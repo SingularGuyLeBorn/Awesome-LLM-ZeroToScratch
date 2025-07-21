@@ -24,11 +24,7 @@ from trl import DPOTrainer
 def format_dpo_dataset(example: dict) -> dict:
     """
     Formats a single example from the source dataset to the required DPO format.
-    The TRL DPOTrainer expects 'prompt', 'chosen', and 'rejected' columns.
     """
-    # Assuming the dataset already has 'prompt', 'chosen', 'rejected' fields.
-    # If your dataset format is different (e.g., 'question', 'answer_good', 'answer_bad'),
-    # you would map them here.
     return {
         "prompt": example["prompt"],
         "chosen": example["chosen"],
@@ -54,52 +50,66 @@ def run_dpo(config_path: str) -> None:
     print(f"Loading dataset: {config['dataset_name']}")
     dataset = load_dataset(config['dataset_name'], split="train")
 
-    # Subset for quick demo if specified in config
-    if 'dataset_subset_size' in config and config['dataset_subset_size'] > 0:
-        dataset = dataset.select(range(config['dataset_subset_size']))
+    if 'dataset_subset_size' in config and int(config['dataset_subset_size']) > 0:
+        dataset = dataset.select(range(int(config['dataset_subset_size'])))
 
     dataset = dataset.map(format_dpo_dataset)
     print(f"Dataset loaded and formatted with {len(dataset)} samples.")
 
     # 3. Load SFT-tuned Model and Tokenizer
     print(f"Loading base SFT model for DPO: {config['model_name_or_path']}")
-    # Determine the compute dtype for quantization based on config and GPU capabilities
-    torch_dtype = torch.float16
-    if config['bf16'] and (torch.cuda.is_available() and torch.cuda.get_device_capability() >= 8):
-        torch_dtype = torch.bfloat16
-    elif config['fp16'] and torch.cuda.is_available():
-        torch_dtype = torch.float16
 
-    quant_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch_dtype,
-        bnb_4bit_use_double_quant=True,
-    )
+    device_map = {"": "cpu"}
+    quant_config = None
+    torch_dtype = torch.float32
+    attn_implementation = "sdpa"
+
+    if torch.cuda.is_available():
+        print("GPU detected. Preparing for GPU execution.")
+        device_map = "auto"
+        use_quantization = config.get('optim') == 'paged_adamw_8bit'
+
+        if use_quantization:
+            print("Applying 4-bit quantization for GPU.")
+            compute_dtype = torch.float16
+            if config.get('bf16', False) and torch.cuda.get_device_capability()[0] >= 8:
+                compute_dtype = torch.bfloat16
+
+            quant_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=compute_dtype,
+                bnb_4bit_use_double_quant=True,
+            )
+            torch_dtype = compute_dtype
+
+        if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:
+            attn_implementation = "flash_attention_2"
+            print("Using Flash Attention 2 for compatible GPU.")
+    else:
+        print("No GPU detected. Configuring for CPU-only execution.")
 
     model = AutoModelForCausalLM.from_pretrained(
         config['model_name_or_path'],
         quantization_config=quant_config,
-        device_map="auto",
+        device_map=device_map,
         trust_remote_code=True,
-        attn_implementation="flash_attention_2" if torch.cuda.is_available() and torch.cuda.get_device_capability() >= 8 else "sdpa",
+        attn_implementation=attn_implementation,
+        torch_dtype=torch_dtype,
     )
-    model.config.use_cache = False  # Disable cache during training
-
-    # The reference model for DPO is a non-trainable copy of the initial model.
-    # TRL handles its creation automatically if you don't provide one, using the same config.
+    model.config.use_cache = False
 
     tokenizer = AutoTokenizer.from_pretrained(config['model_name_or_path'], trust_remote_code=True)
     if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token  # Ensure padding token is set
+        tokenizer.pad_token = tokenizer.eos_token
     print("Model and tokenizer loaded successfully.")
 
     # 4. Configure PEFT (LoRA)
     print("Configuring PEFT with LoRA...")
     peft_config = LoraConfig(
-        r=config['lora_r'],
-        lora_alpha=config['lora_alpha'],
-        lora_dropout=config['lora_dropout'],
+        r=int(config['lora_r']),
+        lora_alpha=int(config['lora_alpha']),
+        lora_dropout=float(config['lora_dropout']),
         target_modules=config['lora_target_modules'],
         bias="none",
         task_type="CAUSAL_LM",
@@ -109,35 +119,36 @@ def run_dpo(config_path: str) -> None:
     print("Setting up training arguments...")
     training_args = TrainingArguments(
         output_dir=config['output_dir'],
-        num_train_epochs=config['num_train_epochs'],
-        per_device_train_batch_size=config['per_device_train_batch_size'],
-        per_device_eval_batch_size=config['per_device_eval_batch_size'],
-        gradient_accumulation_steps=config['gradient_accumulation_steps'],
+        num_train_epochs=int(config['num_train_epochs']),
+        per_device_train_batch_size=int(config['per_device_train_batch_size']),
+        per_device_eval_batch_size=int(config['per_device_eval_batch_size']),
+        gradient_accumulation_steps=int(config['gradient_accumulation_steps']),
         optim=config['optim'],
-        learning_rate=config['learning_rate'],
-        weight_decay=config['weight_decay'],  # Added for consistency
-        bf16=config['bf16'],
-        fp16=config['fp16'],  # Added for consistency
-        max_grad_norm=config['max_grad_norm'],  # Added for consistency
-        logging_steps=config['logging_steps'],
+        # [FIXED] Ensure all numeric values are cast to their correct type
+        learning_rate=float(config['learning_rate']),
+        weight_decay=float(config.get('weight_decay', 0.0)),
+        bf16=config.get('bf16', False) and torch.cuda.is_available(),
+        fp16=config.get('fp16', False) and torch.cuda.is_available(),
+        max_grad_norm=float(config['max_grad_norm']),
+        logging_steps=int(config['logging_steps']),
         lr_scheduler_type=config['lr_scheduler_type'],
         report_to=config['report_to'],
         run_name=config['run_name'],
-        remove_unused_columns=False,  # Necessary for DPO with custom dataset columns
+        remove_unused_columns=False,
     )
 
     # 6. Initialize and Run DPO Trainer
     print("Initializing DPOTrainer...")
     dpo_trainer = DPOTrainer(
         model,
+        ref_model=None,
         args=training_args,
         train_dataset=dataset,
         tokenizer=tokenizer,
         peft_config=peft_config,
-        beta=config['beta'],
-        max_prompt_length=config['max_prompt_length'],
-        max_length=config['max_length'],
-        # eval_dataset=dataset_eval # Can add evaluation set if available
+        beta=float(config['beta']),
+        max_prompt_length=int(config['max_prompt_length']),
+        max_length=int(config['max_length']),
     )
 
     print("--- DPO Training Started ---")
@@ -145,11 +156,9 @@ def run_dpo(config_path: str) -> None:
     print("--- DPO Training Finished ---")
 
     # 7. Save Final Adapter Model and Tokenizer
-    # Mandate of Empirical Proof: Save the model in a reproducible, standard format.
     final_model_path = Path(config['output_dir']) / "final_model"
     print(f"Saving final DPO-tuned adapter model to {final_model_path}...")
-    dpo_trainer.save_model(str(final_model_path))  # Saves PEFT adapter and its config
-    # Save the tokenizer separately to ensure it's available with the adapter
+    dpo_trainer.save_model(str(final_model_path))
     tokenizer.save_pretrained(str(final_model_path))
     print("Model and tokenizer saved successfully.")
 
@@ -161,7 +170,7 @@ if __name__ == "__main__":
         print("Usage: python src/trainers/dpo_trainer.py <path_to_config.yaml>")
         sys.exit(1)
 
-    config_file_path = sys.argv[1] # 修正: 获取正确的命令行参数
+    config_file_path = sys.argv[1]
     run_dpo(config_file_path)
 
 # END OF FILE: src/trainers/dpo_trainer.py

@@ -1,25 +1,22 @@
 # FILE: configs/training/finetune_sft.yaml
 # Bedrock Protocol: Configuration for Supervised Fine-Tuning (SFT) using LoRA.
+# MODIFIED FOR CPU-ONLY EXECUTION & SPEED
 
 # --- Model & Tokenizer ---
-# We use a smaller, community-fine-tuned model for this demo to ensure it runs quickly on a single GPU.
-# For a more powerful base, consider "meta-llama/Llama-3-8B-Instruct".
 model_name_or_path: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 use_fast_tokenizer: true
 
 # --- Dataset ---
-# A small, high-quality dataset formatted for instruction tuning.
 dataset_name: "mlabonne/guanaco-llama2-1k"
-dataset_text_field: "text" # The column in the dataset that contains the conversation text.
-max_seq_length: 512 # Max sequence length to train on.
+dataset_text_field: "text"
+# [MODIFIED FOR CPU SPEED] Add this new parameter to limit dataset size for fast CPU runs.
+dataset_subset_size_cpu: 16 # Use only 16 samples for a quick run.
+max_seq_length: 512
 
 # --- PEFT / LoRA Configuration ---
-# Configuration for Parameter-Efficient Fine-Tuning (PEFT) with LoRA.
-lora_r: 16                     # LoRA rank. A higher rank means more parameters are trained. 16 is a good starting point.
-lora_alpha: 32                 # LoRA alpha, a scaling factor. Typically 2 * lora_r.
-lora_dropout: 0.05             # Dropout probability for LoRA layers.
-# Target modules to apply LoRA to. For Llama-like models, these are the query, key, value, and output projection layers.
-# You can inspect a model's named modules to find these (e.g., model.named_modules()).
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
 lora_target_modules:
   - "q_proj"
   - "k_proj"
@@ -27,25 +24,24 @@ lora_target_modules:
   - "o_proj"
 
 # --- Training Arguments ---
-# Corresponds to Hugging Face `TrainingArguments`.
-output_dir: "./checkpoints/sft-tinyllama-guanaco"
+output_dir: "./checkpoints/sft-tinyllama-guanaco-cpu"
 num_train_epochs: 1
-per_device_train_batch_size: 2
+per_device_train_batch_size: 1
 gradient_accumulation_steps: 4
-optim: "paged_adamw_8bit"      # Memory-efficient optimizer.
-save_steps: 100
-logging_steps: 10
+optim: "adamw_torch"
+save_steps: 10 # Save every 10 steps to have a checkpoint
+logging_steps: 1 # Log every step to see progress
 learning_rate: 2e-4
 weight_decay: 0.001
 fp16: false
-bf16: true                     # Use bfloat16 for mixed-precision training. Requires Ampere or newer GPU.
-max_grad_norm: 1.0             # Aligned with pretrain for consistency.
-max_steps: -1                  # If > 0, overrides num_train_epochs.
+bf16: false
+max_grad_norm: 1.0
+max_steps: 5 # [MODIFIED FOR CPU SPEED] Stop after only 5 training steps. This is the most important change.
 warmup_ratio: 0.03
-lr_scheduler_type: "cosine"    # Learning rate scheduler.
+lr_scheduler_type: "cosine"
 
 # --- Experiment Tracking ---
-report_to: "wandb" # Log metrics and results to Weights & Biases.
-run_name: "sft-tinyllama-guanaco-demo"
+report_to: "none"
+run_name: "sft-tinyllama-guanaco-demo-cpu"
 
 # END OF FILE: configs/training/finetune_sft.yaml

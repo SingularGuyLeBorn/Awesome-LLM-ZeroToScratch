@@ -1,99 +1,139 @@
-# Part 1: 基础环境与项目框架搭建 (Environment and Framework Setup)
+# FILE: docs/01_environment_setup.md
+
+# Part 1: 环境配置：从本地CPU到云端GPU (Environment Setup)
 
 ## 目标 (Goal)
 
-本章节是整个教程的基石。我们将引导您完成从零开始在 [AutoDL](https://www.autodl.com) 平台上配置一个稳定、可复现的深度学习环境，并为后续的模型训练做好准备。
+一个稳定、可复现的环境是成功的开端。本章节将提供两套并行的、针对不同场景的终极环境配置方案。请根据您的需求选择其一。
 
-**本教程面向的用户画像:**
-*   具备 Python 编程、机器学习和 Transformer 理论基础。
-*   缺少大规模模型训练的实践经验。
-*   希望获得一个可以立即上手的、代码驱动的实战项目。
+*   **方案 A (本地CPU):** 适合初学者、代码调试、或在没有GPU的电脑上快速验证数据处理和代码逻辑。**零成本，几分钟搞定。**
+*   **方案 B (云端GPU):** 适合进行真正的模型训练（预训练/微调），充分利用GPU加速。以 [AutoDL](https://www.autodl.com) 平台为例。
 
 ---
 
-### 1. AutoDL 平台选择 (Choosing an AutoDL Instance)
+### 方案A：本地CPU极速验证环境 (推荐新手)
 
-AutoDL 是一个性价比很高的GPU租用平台，非常适合个人开发者和研究者。
+本方案教您如何在自己的电脑 (Windows/macOS/Linux) 上，使用 `uv` 这一现代化的、极速的Python包管理器，搭建一个纯CPU的开发环境。
 
-1.  **注册并登录** AutoDL 平台。
-2.  进入“容器实例”页面，点击“租用新实例”。
-3.  **选择GPU型号**:
-    *   **微调 (Fine-tuning)**: 对于LoRA微调7B级别的模型，推荐选择 **RTX 3090 (24G)** 或 **RTX 4090 (24G)**。性价比高，足以完成大部分微调任务。
-    *   **预训练 (Pre-training)**: 对于从零开始预训练1B级别的模型，需要更大的显存和算力。推荐选择 **A100 (80G)** 或 **A800 (80G)**，并建议租用多卡实例（例如4卡）。
+#### 第一步: 安装 `uv` (若尚未安装)
+`uv` 是一个用Rust编写的、比`pip`和`venv`快得多的工具。此操作只需执行一次。
 
-### 2. 选择镜像 (Selecting the Docker Image)
-
-镜像是预装了操作系统和基础软件的环境。为保证环境的纯净和可控性，我们选择官方的PyTorch镜像。
-
-*   在镜像选择区域，选择 **`PyTorch` -> `2.3.0` -> `cuda12.1`**。
-*   完整的镜像名称类似于 `pytorch/pytorch:2.3.0-cuda12.1-cudnn8-devel`。
-*   **为何选择此镜像?** 它是一个纯净的、带有开发工具（`devel`）的官方镜像，版本较新，兼容我们所需的所有库，避免了其他社区镜像可能带来的依赖冲突。
-*   选择好后，等待实例创建成功并开机。
-
-### 3. 克隆项目并一键环境配置 (Clone Project & One-Click Setup)
-
-实例开机后，点击“JupyterLab”进入工作区。
-
-1.  **打开终端**: 在JupyterLab启动器中，点击 "Terminal" 打开一个终端窗口。
-2.  **创建并激活 Conda 环境 (推荐)**:
-    为了保持环境清洁和避免包冲突，强烈建议为本项目创建一个独立的 Conda 环境。
+*   **Windows (PowerShell):**
+    ```powershell
+    irm https://astral.sh/uv/install.ps1 | iex
+    ```
+*   **macOS/Linux (Terminal):**
     ```bash
-    # 创建名为 'awesome-llm-env' 的 Conda 环境，指定 Python 3.10
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    ```
+
+#### 第二步: 创建并激活虚拟环境
+1.  **进入项目根目录**:
+    打开终端，`cd` 进入 `Awesome-LLM-ZeroToScratch` 文件夹。
+
+2.  **用 `uv` 创建虚拟环境**:
+    ```bash
+    uv venv
+    ```
+    这会在当前目录下创建一个名为 `.venv` 的文件夹。
+
+3.  **激活环境**:
+    *   Windows (PowerShell): `.\.venv\Scripts\Activate.ps1`
+    *   Windows (CMD): `.\.venv\Scripts\activate.bat`
+    *   macOS/Linux: `source .venv/bin/activate`
+    激活成功后，命令行前会出现 `(.venv)` 标识。
+
+#### 第三步: 使用 `uv` 一键安装CPU依赖
+我们将使用一个专门为CPU环境优化的 `requirements-cpu.txt` 文件。
+
+1.  **创建 `requirements-cpu.txt` 文件**:
+    在项目根目录下创建此文件，并复制以下内容。这个文件巧妙地通过 `--extra-index-url` 指定了PyTorch的CPU版本下载地址，确保 `uv` 能找到正确的包。
+
+    ```text
+    # FILE: requirements-cpu.txt
+    # 终极版：一个自给自足的、用于本地CPU测试的依赖文件。
+
+    # --- 指定额外的包索引地址 ---
+    # 告诉uv/pip，要去PyTorch的CPU官方地址寻找包
+    --extra-index-url https://download.pytorch.org/whl/cpu
+
+    # --- 核心深度学习框架 (CPU版本) ---
+    torch==2.3.0
+    torchvision
+    torchaudio
+
+    # --- Hugging Face 生态系统 (核心) ---
+    transformers==4.41.2
+    datasets==2.19.0
+    accelerate==0.30.1
+    tokenizers==0.19.1
+    peft==0.11.1
+    trl==0.9.4
+
+    # --- 数据处理与工具库 ---
+    sentencepiece==0.2.0
+    pyyaml==6.0.1
+    Pillow==10.4.0
+    tqdm
+
+    # --- 代码质量工具 (可选) ---
+    ruff==0.4.4
+    ```
+
+2.  **执行安装命令**:
+    ```bash
+    uv pip install -r requirements-cpu.txt --index-url https://pypi.tuna.tsinghua.edu.cn/simple --index-strategy unsafe-best-match
+    ```
+    *   `--index-url`: 使用清华镜像源，国内加速。
+    *   `--index-strategy unsafe-best-match`: 允许 `uv` 在所有源（清华源、PyTorch CPU源）中自由寻找最佳匹配，解决依赖冲突。
+
+**至此，您的本地CPU环境已完美就绪！** 您可以运行数据处理、模型推理等不依赖GPU的任务，甚至可以进行非常慢的CPU模型训练来验证代码逻辑。
+
+---
+
+### 方案B：云端GPU生产级训练环境 (AutoDL)
+
+本方案专为 AutoDL 等云平台设计，通过 `setup.sh` 脚本解决网络、依赖和编译等一系列棘手问题。
+
+#### 第一步: 租用并配置AutoDL实例
+1.  **租用实例**:
+    *   **微调**: 推荐 **RTX 3090/4090 (24G)**。
+    *   **预训练**: 推荐 **A100/A800 (80G)**。
+2.  **选择镜像**:
+    *   选择 **`PyTorch` -> `2.3.0` -> `cuda12.1`**。这是一个纯净的官方镜像，能最大限度避免环境污染。
+3.  **数据与代码挂载**:
+    *   **代码、数据、模型 checkpoints**: 全部存放在 `/root/autodl-tmp` 目录下，这是一个网盘，数据不会丢失。
+    *   **Conda 环境**: 默认安装在本地盘，随实例释放而消失，但可以快速重建。
+
+#### 第二步: 一键部署
+实例开机后，进入JupyterLab并打开一个终端。
+
+1.  **创建并激活Conda环境**:
+    ```bash
+    # 为项目创建一个隔离的、干净的 Conda 环境
     conda create -n awesome-llm-env python=3.10 -y
+
     # 激活新环境
     conda activate awesome-llm-env
-    # 如果遇到 "CondaError: Run 'conda init' before 'conda activate'"，请执行 `conda init`，然后关闭并重新打开终端，或执行 `source ~/.bashrc`
     ```
-    *如果您没有安装 Conda，可以使用 `python3 -m venv .venv` 创建一个虚拟环境，然后 `source .venv/bin/activate` 激活它。*
-3.  **进入项目目录**:
-    请确保您的项目 `Awesome-LLM-ZeroToScratch` 文件夹已位于 `/root/autodl-tmp/` 目录下（如前一步骤所示）。然后进入该目录：
+
+2.  **运行一键安装脚本**:
     ```bash
+    # 进入项目代码所在目录
     cd /root/autodl-tmp/Awesome-LLM-ZeroToScratch
+
+    # 赋予脚本执行权限
+    chmod +x setup.sh
+
+    # 执行脚本，开始全自动安装
+    ./setup.sh
     ```
-4.  **运行一键安装脚本**:
-    确保您的 Conda (或虚拟) 环境已激活，并且您已在项目根目录下，然后运行我们提供的一键安装脚本 `setup.sh`。
-    ```bash
-    bash setup.sh
-    ```
-    此脚本将执行以下操作：
-    *   配置 `pip` 使用清华大学 PyPI 镜像（用于安装 `uv` 自身）。
-    *   **安装 `uv` (一个极速的 Python 包管理器)**。
-    *   明确指示 `uv` 将使用清华大学 PyPI 镜像和 PyTorch 官方 CUDA 轮子源 (`https://download.pytorch.org/whl/cu121`)，这将大幅加速下载。
-    *   **优先使用 `uv` 安装 `torch` 和 `bitsandbytes`**，以确保这些核心依赖在其他包编译前就位。在此步骤中，您会看到 `uv` 显示下载进度条。
-    *   **然后使用 `uv` 安装 `requirements.txt` 中剩余的所有固定版本的依赖库**，同样利用配置的镜像源。
-    *   **最后，使用 `uv` 安装 `flash-attn` 并禁用构建隔离**，确保它能正确编译和链接到已安装的 `torch`，同时利用镜像源加速下载。此步骤可能会涉及编译，请耐心等待。
+    `setup.sh` 脚本经过精心设计，它会：
+    *   安装 `uv` 和 `aria2c` 等效率工具。
+    *   使用 `uv` 和国内镜像高速安装 `requirements.txt` 中的绝大部分依赖。
+    *   **单独、稳健地处理 `flash-attn`**: 先用 `aria2c` 多线程断点续传下载其 `.whl` 文件，再从本地安装。**这是克服国内云服务器网络不稳的“杀手锏”**。
 
-    请耐心等待脚本执行完毕。在 `uv` 下载大文件时，您会看到清晰的进度条。看到 "Environment Setup Complete" 消息即表示成功。
-
-### 4. 数据与代码挂载策略 (Data and Code Mounting Strategy)
-
-在AutoDL上，理解不同磁盘的用途至关重要，这是实现数据持久化和实例无状态切换的关键。
-
-*   **/root/autodl-tmp**: 这是**网盘**，它的数据在实例关机、重启甚至删除后 **依然存在**。它适合存放：
-    *   **数据集 (Datasets)**
-    *   **预训练权重 (Pre-trained Weights)**
-    *   **项目代码 (Your Project Code)**
-    *   **训练好的模型 checkpoints**
-*   **/root/autodl-fs**: 这是**本地高速盘**，它的数据会随实例的删除而 **永久丢失**。它适合存放：
-    *   **Conda/Python 环境**
-    *   临时文件和缓存
-
-**推荐工作流:**
-
-1.  将本项目 `Awesome-LLM-ZeroToScratch` 克隆并存放在 `/root/autodl-tmp` 目录下。
-2.  所有大型数据集都下载或传输到 `/root/autodl-tmp/data` 目录。
-3.  所有训练产出的模型权重都保存到 `/root/autodl-tmp/checkpoints` 目录。
-4.  这样，即使您更换了GPU实例，只需在新实例的 `/root/autodl-tmp` 中找到您的代码和数据，重新激活一下 Conda 环境，即可无缝继续工作。
-
-### 5. 验证安装 (Verifying the Installation)
-
-在终端中执行以下Python命令，验证核心库已正确安装：
-
+#### 第三步: 验证安装
+在激活了 `awesome-llm-env` 环境的终端中，运行：
 ```bash
-python -c "import torch; import transformers; import deepspeed; import flash_attn; print('--- Bedrock Verification Protocol ---'); print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print('Core libraries imported successfully. System is ready.')"
-```
-
-如果您看到打印出的版本号和成功信息，并且`CUDA available`为`True`，那么恭喜您，基础环境已完美搭建。
-
----
-**您已完成第一部分。接下来，请移步至 [docs/02_data_pipeline.md](./docs/02_data_pipeline.md) 开始数据准备工作。**
+python -c "import torch; import transformers; import deepspeed; import flash_attn; print('--- Bedrock Verification Protocol ---'); print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'bitsandbytes GPU support: {torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8}'); print('Core libraries imported successfully. System is ready.')"

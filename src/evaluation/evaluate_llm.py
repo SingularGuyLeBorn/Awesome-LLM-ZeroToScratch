@@ -49,7 +49,7 @@ def run_evaluation(model_path: str, tasks: str = "mmlu_flan_n_shot", num_samples
             print(f"Warning: Could not extract base model from PEFT config ({e}).")
             print("Attempting to infer base model from SFT config for tutorial purposes.")
             try:
-                # 修正: 更稳健地推断项目根目录和 SFT 配置路径
+                # Correctly infer project root and SFT config path
                 script_path = Path(__file__).resolve()
                 project_root = script_path.parent.parent.parent # Assuming script is in src/evaluation/
                 sft_config_path = project_root / "configs/training/finetune_sft.yaml"
@@ -66,18 +66,19 @@ def run_evaluation(model_path: str, tasks: str = "mmlu_flan_n_shot", num_samples
         print("Detected full model. Loading directly.")
 
     try:
-        tokenizer_load_path = model_path if is_peft_adapter and (
-                    peft_adapter_dir / "tokenizer.json").exists() else base_model_name_or_path
+        # If the PEFT adapter directory contains a tokenizer, use that, otherwise use the base model's tokenizer.
+        # This is important if the tokenizer was modified/trained during SFT.
+        tokenizer_load_path = model_path if is_peft_adapter and (Path(model_path) / "tokenizer.json").exists() else base_model_name_or_path
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_load_path, trust_remote_code=True)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
         model = AutoModelForCausalLM.from_pretrained(
             base_model_name_or_path,
-            torch_dtype=torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_capability() >= 8 else torch.float16,
+            torch_dtype=torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 else torch.float16,
             device_map="auto",
             trust_remote_code=True,
-            attn_implementation="flash_attention_2" if torch.cuda.is_available() and torch.cuda.get_device_capability() >= 8 else "sdpa",
+            attn_implementation="flash_attention_2" if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 else "sdpa",
         )
         if is_peft_adapter:
             model = PeftModel.from_pretrained(model, model_path)
@@ -123,16 +124,16 @@ def run_evaluation(model_path: str, tasks: str = "mmlu_flan_n_shot", num_samples
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python src/evaluation/evaluate_llm.py <path_to_model_or_adapter> [tasks] [num_samples]")
-        print(
-            "Example: python src/evaluation/evaluate_llm.py ./checkpoints/sft-tinyllama-guanaco/final_model mmlu_flan_n_shot 50")
-        sys.exit(1)
+    # Fix: Correctly parse command-line arguments using argparse for robustness
+    import argparse
+    parser = argparse.ArgumentParser(description="Run LLM evaluation.")
+    parser.add_argument("model_path", type=str, help="Path to the model checkpoint or PEFT adapter.")
+    parser.add_argument("--tasks", type=str, default="mmlu_flan_n_shot",
+                        help="Comma-separated string of tasks to evaluate.")
+    parser.add_argument("--num_samples", type=int, default=10,
+                        help="Number of samples to evaluate on (for quick testing).")
+    args = parser.parse_args()
 
-    model_path_arg = sys.argv[1] # 修正: 获取正确的命令行参数
-    tasks_arg = sys.argv[2] if len(sys.argv) > 2 else "mmlu_flan_n_shot" # 修正: 获取正确的命令行参数
-    num_samples_arg = int(sys.argv[3]) if len(sys.argv) > 3 else 10 # 修正: 获取正确的命令行参数
-
-    run_evaluation(model_path_arg, tasks_arg, num_samples_arg)
+    run_evaluation(args.model_path, args.tasks, args.num_samples)
 
 # END OF FILE: src/evaluation/evaluate_llm.py

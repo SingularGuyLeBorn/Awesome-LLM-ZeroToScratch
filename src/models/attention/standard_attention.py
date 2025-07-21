@@ -9,83 +9,116 @@ serving as a foundational component for our Transformer models.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
+from typing import Optional, Tuple
 
 
 class StandardAttention(nn.Module):
     """
-    Implements standard multi-head self-attention.
+    Implements standard multi-head self-attention, supporting KV caching and GQA/MQA.
     """
 
-    def __init__(self, hidden_size: int, num_attention_heads: int):
+    def __init__(self, hidden_size: int, num_attention_heads: int, num_key_value_heads: Optional[int] = None):
         super().__init__()
+        if num_key_value_heads is None:
+            num_key_value_heads = num_attention_heads  # Default to MHA
+
         if hidden_size % num_attention_heads != 0:
             raise ValueError(
                 f"hidden_size ({hidden_size}) must be divisible by num_attention_heads ({num_attention_heads})"
             )
+        if hidden_size % num_key_value_heads != 0:
+            raise ValueError(
+                f"hidden_size ({hidden_size}) must be divisible by num_key_value_heads ({num_key_value_heads})"
+            )
 
         self.hidden_size = hidden_size
         self.num_attention_heads = num_attention_heads
+        self.num_key_value_heads = num_key_value_heads
         self.head_dim = hidden_size // num_attention_heads
+        self.num_key_value_groups = self.num_attention_heads // self.num_key_value_heads
 
         self.q_proj = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.k_proj = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.v_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.k_proj = nn.Linear(hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(hidden_size, hidden_size, bias=False)
 
-    def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
+    def _split_heads(self, x: torch.Tensor, num_heads: int) -> torch.Tensor:
         """
         Splits the input tensor into multiple heads.
-        Input shape: (batch_size, seq_len, hidden_size)
+        Input shape: (batch_size, seq_len, hidden_size) or (batch_size, seq_len, num_kv_heads * head_dim)
+        Output shape: (batch_size, num_heads, seq_len, head_dim)
+        """
+        new_shape = x.size()[:-1] + (num_heads, self.head_dim)
+        x = x.view(new_shape)
+        return x.permute(0, 2, 1, 3)  # (batch_size, num_heads, seq_len, head_dim)
+
+    def _repeat_kv(self, hidden_states: torch.Tensor, num_kv_groups: int) -> torch.Tensor:
+        """
+        Repeats K/V heads for Grouped-Query Attention (GQA).
+        Input shape: (batch_size, num_key_value_heads, seq_len, head_dim)
         Output shape: (batch_size, num_attention_heads, seq_len, head_dim)
         """
-        new_shape = x.size()[:-1] + (self.num_attention_heads, self.head_dim)
-        x = x.view(new_shape)
-        return x.permute(0, 2, 1, 3)
-
-    def _merge_heads(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Merges attention heads back to the original hidden size.
-        Input shape: (batch_size, num_attention_heads, seq_len, head_dim)
-        Output shape: (batch_size, seq_len, hidden_size)
-        """
-        x = x.permute(0, 2, 1, 3).contiguous()
-        new_shape = x.size()[:-2] + (self.hidden_size,)
-        return x.view(new_shape)
+        if num_kv_groups == 1:
+            return hidden_states
+        batch_size, num_kv_heads, seq_len, head_dim = hidden_states.shape
+        hidden_states = hidden_states[:, :, None, :, :].expand(batch_size, num_kv_heads, num_kv_groups, seq_len,
+                                                               head_dim)
+        return hidden_states.reshape(batch_size, num_kv_heads * num_kv_groups, seq_len, head_dim)
 
     def forward(
             self,
-            hidden_states: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+            hidden_states: torch.Tensor,  # (batch_size, seq_len, hidden_size)
+            attention_mask: Optional[torch.Tensor] = None,
+            # (batch_size, current_total_seq_len) from transformers.generate()
+            past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # (key_past, value_past)
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:  # (attn_output, (key_present, value_present))
         """
-        Forward pass for standard multi-head self-attention.
+        Forward pass for standard multi-head self-attention with KV caching.
         """
+        batch_size, q_seq_len, _ = hidden_states.shape
+
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = self._split_heads(query_states)
-        key_states = self._split_heads(key_states)
-        value_states = self._split_heads(value_states)
+        query_states = self._split_heads(query_states, self.num_attention_heads)  # (B, H_attn, S_q, D)
+        key_states = self._split_heads(key_states, self.num_key_value_heads)  # (B, H_kv, S_kv, D)
+        value_states = self._split_heads(value_states, self.num_key_value_heads)  # (B, H_kv, S_kv, D)
 
-        extended_attention_mask = None
+        if past_key_value is not None:
+            # past_key_value: (key_past, value_past) where key_past.shape = (B, H_kv, S_past, D)
+            key_states = torch.cat((past_key_value[0], key_states), dim=2)
+            value_states = torch.cat((past_key_value[1], value_states), dim=2)
+
+        # Apply GQA/MQA repetition for keys and values
+        key_states = self._repeat_kv(key_states, self.num_key_value_groups)  # (B, H_attn, S_total, D)
+        value_states = self._repeat_kv(value_states, self.num_key_value_groups)  # (B, H_attn, S_total, D)
+
+        # present_key_value for the next step of generation
+        present_key_value = (key_states, value_states)
+
+        # Create attention mask.
+        # attention_mask from generate() is (batch_size, current_total_seq_len) where 0 is padding.
+        # F.scaled_dot_product_attention expects additive_bias (B, 1, S_Q, S_KV) or (B, 1, S_Q, S_KV) for causal.
+        # Since is_causal=True handles causality, we only need to convert padding mask.
+        additive_attention_mask = None
         if attention_mask is not None:
-            # +++ START OF THE FIX +++
-            # Ensure the mask has the same data type as the query tensor.
-            extended_attention_mask = (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * torch.finfo(query_states.dtype).min
-            extended_attention_mask = extended_attention_mask.to(query_states.dtype)
-            # +++ END OF THE FIX +++
+            # (batch_size, 1, 1, current_total_seq_len)
+            additive_attention_mask = (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * torch.finfo(
+                query_states.dtype).min
+            additive_attention_mask = additive_attention_mask.to(query_states.dtype)
 
         attn_output = F.scaled_dot_product_attention(
-            query_states,
-            key_states,
-            value_states,
-            attn_mask=extended_attention_mask,
+            query_states,  # (B, H_attn, S_q, D)
+            key_states,  # (B, H_attn, S_kv_total, D)
+            value_states,  # (B, H_attn, S_kv_total, D)
+            attn_mask=additive_attention_mask,
             is_causal=True
-        )
+        )  # (B, H_attn, S_q, D)
 
-        attn_output = self._merge_heads(attn_output)
+        attn_output = self._merge_heads(attn_output)  # (B, S_q, hidden_size)
         output = self.o_proj(attn_output)
 
-        return output
+        return output, present_key_value
+
+# END OF FILE: src/models/attention/standard_attention.py
