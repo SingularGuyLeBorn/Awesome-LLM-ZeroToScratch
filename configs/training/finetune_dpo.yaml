@@ -1,6 +1,6 @@
 # FILE: configs/training/finetune_dpo.yaml
 # Bedrock Protocol: Configuration for Direct Preference Optimization (DPO).
-# MODIFIED FOR CPU-ONLY EXECUTION
+# MODIFIED FOR CPU-ONLY EXECUTION & SPEED & MINIMAL MEMORY
 
 # --- Model & Tokenizer ---
 # DPO starts from a supervised fine-tuned (SFT) model.
@@ -10,7 +10,7 @@ use_fast_tokenizer: true
 
 # --- Dataset ---
 dataset_name: "trl-internal-testing/hh-rlhf-trl-style"
-dataset_subset_size: 200 # Reduced for quicker CPU run
+dataset_subset_size: 10 # [MODIFIED] Reduced to absolute minimum for memory test
 
 # --- DPO Specific Parameters ---
 beta: 0.1
@@ -20,17 +20,19 @@ output_dir: "./checkpoints/dpo-tinyllama-guanaco-cpu" # Changed output dir for C
 num_train_epochs: 1
 per_device_train_batch_size: 1      # [MODIFIED] Reduced for CPU memory
 per_device_eval_batch_size: 1
-gradient_accumulation_steps: 4
+gradient_accumulation_steps: 1      # [MODIFIED] Reduced to absolute minimum
 optim: "adamw_torch"                # [MODIFIED] Switched to standard CPU-compatible optimizer
 learning_rate: 5e-5
 weight_decay: 0.001
 fp16: false                         # [MODIFIED] Disabled for CPU
 bf16: false                         # [MODIFIED] Disabled for CPU
 max_grad_norm: 1.0
-logging_steps: 10
-max_length: 512                     # Reduced for faster CPU run
-max_prompt_length: 256              # Reduced for faster CPU run
-max_target_length: 256              # Reduced for faster CPU run
+logging_steps: 1                    # Log every step
+# [MODIFIED FOR CPU SPEED] Stop after only 2 training steps.
+max_steps: 2
+max_length: 256                     # Reduced for memory
+max_prompt_length: 128              # Reduced for memory
+max_target_length: 128              # Reduced for memory
 warmup_ratio: 0.1
 lr_scheduler_type: "linear"
 

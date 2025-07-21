@@ -10,34 +10,40 @@ import sys
 from pathlib import Path
 import yaml
 import torch
+import gc
 from datasets import load_dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     TrainingArguments,
-    BitsAndBytesConfig,
 )
-from peft import LoraConfig
+from peft import LoraConfig, PeftModel, PeftConfig
 from trl import DPOTrainer
 
 
-def format_dpo_dataset(example: dict) -> dict:
-    """
-    Formats a single example from the source dataset to the required DPO format.
-    """
-    return {
-        "prompt": example["prompt"],
-        "chosen": example["chosen"],
-        "rejected": example["rejected"],
-    }
+# Factory function for data formatting
+def format_dpo_dataset_factory(tokenizer):
+    def format_dpo_dataset(example: dict) -> dict:
+        prompt_messages = example['chosen'][:-1]
+        chosen_messages = example['chosen']
+        rejected_messages = example['rejected']
+
+        prompt_str = tokenizer.apply_chat_template(prompt_messages, tokenize=False, add_generation_prompt=True)
+        chosen_str = tokenizer.apply_chat_template(chosen_messages, tokenize=False)
+        rejected_str = tokenizer.apply_chat_template(rejected_messages, tokenize=False)
+
+        return {
+            "prompt": prompt_str,
+            "chosen": chosen_str,
+            "rejected": rejected_str,
+        }
+
+    return format_dpo_dataset
 
 
 def run_dpo(config_path: str) -> None:
     """
     Main function to execute the DPO process.
-
-    Args:
-        config_path: Path to the YAML configuration file.
     """
     print("--- [Bedrock] Initiating Direct Preference Optimization (DPO) ---")
 
@@ -46,66 +52,56 @@ def run_dpo(config_path: str) -> None:
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
 
-    # 2. Load Dataset
+    # 2. Load Tokenizer FIRST
+    tokenizer = AutoTokenizer.from_pretrained(config['model_name_or_path'], trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    print("Tokenizer loaded successfully.")
+
+    # 3. Load and Format Dataset
     print(f"Loading dataset: {config['dataset_name']}")
     dataset = load_dataset(config['dataset_name'], split="train")
 
     if 'dataset_subset_size' in config and int(config['dataset_subset_size']) > 0:
         dataset = dataset.select(range(int(config['dataset_subset_size'])))
 
-    dataset = dataset.map(format_dpo_dataset)
+    formatting_function = format_dpo_dataset_factory(tokenizer)
+    dataset = dataset.map(formatting_function)
     print(f"Dataset loaded and formatted with {len(dataset)} samples.")
 
-    # 3. Load SFT-tuned Model and Tokenizer
-    print(f"Loading base SFT model for DPO: {config['model_name_or_path']}")
+    # [ULTIMATE FIX V7.0 - Force load into RAM]
+    # This is our last resort for the stubborn meta tensor issue on CPU.
+    # We will load the model fully into RAM, which relies on having enough virtual memory.
 
-    device_map = {"": "cpu"}
-    quant_config = None
-    torch_dtype = torch.float32
-    attn_implementation = "sdpa"
+    print("Loading PEFT model and merging LoRA layers to force loading into RAM...")
+    peft_config_for_base = PeftConfig.from_pretrained(config['model_name_or_path'])
+    base_model_name = peft_config_for_base.base_model_name_or_path
 
-    if torch.cuda.is_available():
-        print("GPU detected. Preparing for GPU execution.")
-        device_map = "auto"
-        use_quantization = config.get('optim') == 'paged_adamw_8bit'
-
-        if use_quantization:
-            print("Applying 4-bit quantization for GPU.")
-            compute_dtype = torch.float16
-            if config.get('bf16', False) and torch.cuda.get_device_capability()[0] >= 8:
-                compute_dtype = torch.bfloat16
-
-            quant_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=compute_dtype,
-                bnb_4bit_use_double_quant=True,
-            )
-            torch_dtype = compute_dtype
-
-        if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:
-            attn_implementation = "flash_attention_2"
-            print("Using Flash Attention 2 for compatible GPU.")
-    else:
-        print("No GPU detected. Configuring for CPU-only execution.")
-
-    model = AutoModelForCausalLM.from_pretrained(
-        config['model_name_or_path'],
-        quantization_config=quant_config,
-        device_map=device_map,
-        trust_remote_code=True,
-        attn_implementation=attn_implementation,
-        torch_dtype=torch_dtype,
+    # Step 1: Load the base model fully onto CPU. No device_map, no offload.
+    print(f"Loading base model '{base_model_name}' fully into RAM...")
+    base_model = AutoModelForCausalLM.from_pretrained(
+        base_model_name,
+        torch_dtype=torch.float32,  # Use float32 for CPU
     )
-    model.config.use_cache = False
 
-    tokenizer = AutoTokenizer.from_pretrained(config['model_name_or_path'], trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    print("Model and tokenizer loaded successfully.")
+    # Step 2: Load the PEFT model on top of the base model
+    print("Loading PEFT adapter...")
+    model = PeftModel.from_pretrained(base_model, config['model_name_or_path'])
 
-    # 4. Configure PEFT (LoRA)
-    print("Configuring PEFT with LoRA...")
+    # Step 3: Merge the LoRA layers into the base model
+    print("Merging LoRA layers...")
+    model = model.merge_and_unload()
+    print("POLICY model prepared and fully loaded into RAM.")
+
+    # We will not use a separate ref_model. DPOTrainer can create one from the merged model.
+    # This minimizes the memory footprint to just one full model + its copy.
+    ref_model = None
+
+    # Garbage collect to free up memory from intermediate loading steps
+    gc.collect()
+
+    # 5. Configure PEFT (LoRA) for DPO training
+    print("Configuring PEFT with LoRA for DPO training...")
     peft_config = LoraConfig(
         r=int(config['lora_r']),
         lora_alpha=int(config['lora_alpha']),
@@ -115,7 +111,7 @@ def run_dpo(config_path: str) -> None:
         task_type="CAUSAL_LM",
     )
 
-    # 5. Configure Training Arguments
+    # 6. Configure Training Arguments
     print("Setting up training arguments...")
     training_args = TrainingArguments(
         output_dir=config['output_dir'],
@@ -124,28 +120,28 @@ def run_dpo(config_path: str) -> None:
         per_device_eval_batch_size=int(config['per_device_eval_batch_size']),
         gradient_accumulation_steps=int(config['gradient_accumulation_steps']),
         optim=config['optim'],
-        # [FIXED] Ensure all numeric values are cast to their correct type
         learning_rate=float(config['learning_rate']),
         weight_decay=float(config.get('weight_decay', 0.0)),
-        bf16=config.get('bf16', False) and torch.cuda.is_available(),
-        fp16=config.get('fp16', False) and torch.cuda.is_available(),
+        bf16=False,
+        fp16=False,
         max_grad_norm=float(config['max_grad_norm']),
         logging_steps=int(config['logging_steps']),
+        max_steps=int(config['max_steps']),
         lr_scheduler_type=config['lr_scheduler_type'],
         report_to=config['report_to'],
         run_name=config['run_name'],
         remove_unused_columns=False,
     )
 
-    # 6. Initialize and Run DPO Trainer
+    # 7. Initialize and Run DPO Trainer
     print("Initializing DPOTrainer...")
     dpo_trainer = DPOTrainer(
-        model,
-        ref_model=None,
+        model=model,
+        ref_model=ref_model,  # Let TRL handle creation of the reference model from the merged model
         args=training_args,
         train_dataset=dataset,
         tokenizer=tokenizer,
-        peft_config=peft_config,
+        peft_config=peft_config,  # Re-apply LoRA to the merged model for training
         beta=float(config['beta']),
         max_prompt_length=int(config['max_prompt_length']),
         max_length=int(config['max_length']),
@@ -155,7 +151,7 @@ def run_dpo(config_path: str) -> None:
     dpo_trainer.train()
     print("--- DPO Training Finished ---")
 
-    # 7. Save Final Adapter Model and Tokenizer
+    # 8. Save Final Adapter Model and Tokenizer
     final_model_path = Path(config['output_dir']) / "final_model"
     print(f"Saving final DPO-tuned adapter model to {final_model_path}...")
     dpo_trainer.save_model(str(final_model_path))
