@@ -25,6 +25,7 @@ from huggingface_hub.hf_api import RepoFile
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    GenerationConfig,
 )
 from peft import LoraConfig, PeftModel, PeftConfig, get_peft_model
 from trl import PPOConfig, PPOTrainer, AutoModelForCausalLMWithValueHead
@@ -32,7 +33,8 @@ from trl import PPOConfig, PPOTrainer, AutoModelForCausalLMWithValueHead
 # Ensure project root is in path for imports
 script_path = Path(__file__).resolve()
 project_root = script_path.parent.parent.parent
-sys.path.append(str(project_root))
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
 
 
 def load_dataset_robustly(repo_id: str, split: str):
@@ -158,35 +160,29 @@ def run_ppo(config_path: str) -> None:
     tokenizer.padding_side = "left"
 
     def tokenize(example):
-        return tokenizer(example["query"], truncation=True, max_length=128)
+        return tokenizer(
+            example["query"],
+            truncation=True,
+            max_length=128,
+            padding="max_length"
+        )
 
     dataset = dataset.map(tokenize, batched=False)
     dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "query"])
     print(f"Dataset loaded and formatted with {len(dataset)} prompts.")
 
-    print(f"\n[Model Loading] Loading SFT model as Actor for PPO: {config['model_name_or_path']}")
+    print(f"\n[Model Loading] Loading and preparing PPO Actor model from: {config['model_name_or_path']}")
 
     peft_config_for_base = PeftConfig.from_pretrained(config['model_name_or_path'])
     base_model_name = peft_config_for_base.base_model_name_or_path
 
-    # [ELEGANT REFACTOR V15.0] In-memory model preparation to avoid warnings
-    print("--> Step 1/2: Loading base model, merging SFT adapter, and attaching ValueHead...")
+    print("--> Step 1/2: Loading SFT-tuned model and merging into a clean base model...")
+    base_model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32)
+    sft_merged_model = PeftModel.from_pretrained(base_model, config['model_name_or_path']).merge_and_unload()
+    print("--> SFT weights merged successfully.")
 
-    # We need a value head for PPO, so we load the base model with this wrapper
-    model = AutoModelForCausalLMWithValueHead.from_pretrained(
-        base_model_name,
-        torch_dtype=torch.float32,
-    )
-
-    # Load and merge the SFT adapter into the new model with a value head
-    model = PeftModel.from_pretrained(model, config['model_name_or_path'])
-    model = model.merge_and_unload()
-    print("--> Base model with ValueHead and merged SFT adapter is ready.")
-
-    gc.collect()
-
-    print("\n[Configuration] Re-applying PEFT with LoRA for PPO training...")
-    peft_config = LoraConfig(
+    print("--> Step 2/2: Wrapping SFT model with ValueHead AND applying PEFT adapter in a single operation...")
+    ppo_peft_config = LoraConfig(
         r=int(config['lora_r']),
         lora_alpha=int(config['lora_alpha']),
         lora_dropout=float(config['lora_dropout']),
@@ -194,35 +190,37 @@ def run_ppo(config_path: str) -> None:
         bias="none",
         task_type="CAUSAL_LM",
     )
-    # The model is now a clean AutoModelForCausalLMWithValueHead, ready for a new adapter
-    model = get_peft_model(model, peft_config)
-    print("--> Step 2/2: New PEFT adapter for PPO training re-applied successfully.")
-    model.print_trainable_parameters()
+
+    model = AutoModelForCausalLMWithValueHead.from_pretrained(
+        sft_merged_model,
+        peft_config=ppo_peft_config,
+    )
+    print("--> PPO Actor model with ValueHead and LoRA adapter is ready.")
+
+    # [FINAL FIX] The `print_trainable_parameters` method is part of the PEFT model,
+    # but not the top-level wrapper. We can safely remove this line.
+    # The trainer itself will log parameter counts upon initialization.
+    # model.print_trainable_parameters()
+
+    gc.collect()
 
     print("\n[Configuration] Setting up PPO training arguments...")
 
-    log_with = config.get('report_to')
-    if log_with == "none" or log_with is None:
+    log_with = config.get('report_to', 'none')
+    if log_with == 'none':
         log_with = None
-    else:
-        # For other values like "wandb", we keep them
-        pass
 
     ppo_config = PPOConfig(
         exp_name=config['run_name'],
         log_with=log_with,
-        model_name=config['model_name_or_path'],
-        steps=int(config['ppo_steps']),
         learning_rate=float(config['learning_rate']),
         batch_size=int(config['batch_size']),
         mini_batch_size=int(config['mini_batch_size']),
         gradient_accumulation_steps=int(config['gradient_accumulation_steps']),
-        ppo_epochs=int(config['ppo_epochs']),
-        init_kl_coef=float(config['init_kl_coef']),
         target_kl=float(config.get('target_kl', 0.1)),
         adap_kl_ctrl=bool(config['adap_kl_ctrl']),
         seed=int(config['seed']),
-        remove_unused_columns=False
+        remove_unused_columns=False,
     )
 
     print("[Reward Model] Initializing conceptual Reward Model (rewards based on length)...")
@@ -244,22 +242,30 @@ def run_ppo(config_path: str) -> None:
     )
 
     print("\n--- PPO Training Started (Conceptual) ---")
-    generation_kwargs = {"min_length": -1, "top_k": 0.0, "top_p": 1.0, "do_sample": True,
-                         "pad_token_id": tokenizer.eos_token_id, "max_new_tokens": int(config['max_new_tokens']), }
+    generation_kwargs = GenerationConfig(
+        min_length=-1,
+        top_k=0.0,
+        top_p=1.0,
+        do_sample=True,
+        pad_token_id=tokenizer.eos_token_id,
+        max_new_tokens=int(config['max_new_tokens']),
+    )
 
     stats_keys_to_log = [
         "ppo/loss/total", "ppo/loss/policy", "ppo/loss/value",
         "ppo/returns/mean", "ppo/returns/var", "objective/kl", "ppo/policy/approxkl",
     ]
 
+    total_ppo_steps = int(config['ppo_steps'])
     for step, batch in enumerate(ppo_trainer.dataloader):
-        if step >= ppo_config.steps:
+        if step >= total_ppo_steps:
             break
 
         query_tensors = batch['input_ids']
         queries = [q for q in query_tensors]
 
-        response_tensors = ppo_trainer.generate(queries, **generation_kwargs)
+        response_tensors = ppo_trainer.generate(queries, **generation_kwargs.to_dict())
+
         batch['response'] = tokenizer.batch_decode(response_tensors, skip_special_tokens=True)
 
         rewards = get_dummy_reward(batch["response"])
@@ -267,12 +273,11 @@ def run_ppo(config_path: str) -> None:
         stats = ppo_trainer.step(queries, response_tensors, rewards)
         ppo_trainer.log_stats(stats, batch, rewards)
 
-        log_output = f"Conceptual PPO Step {step + 1}/{ppo_config.steps}:"
+        log_output = f"Conceptual PPO Step {step + 1}/{total_ppo_steps}:"
         for key in stats_keys_to_log:
             value = stats.get(key)
             if value is not None:
                 log_output += f" | {key.split('/')[-1]}: {float(value):.4f}"
-
         print(log_output)
 
     print("\n--- PPO Training Finished (Conceptual) ---")
@@ -281,8 +286,7 @@ def run_ppo(config_path: str) -> None:
     os.makedirs(final_model_path, exist_ok=True)
 
     print(f"\n[Saving] Saving final PPO-tuned adapter model to {final_model_path}...")
-
-    ppo_trainer.model.save_pretrained(str(final_model_path))
+    ppo_trainer.save_pretrained(str(final_model_path))
     tokenizer.save_pretrained(str(final_model_path))
 
     print("Model and tokenizer saved successfully.")
@@ -296,5 +300,3 @@ if __name__ == "__main__":
         sys.exit(1)
     config_file_path = sys.argv[1]
     run_ppo(config_file_path)
-
-# END OF FILE: src/trainers/ppo_trainer.py
