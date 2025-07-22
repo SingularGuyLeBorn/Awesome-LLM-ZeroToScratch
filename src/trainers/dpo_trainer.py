@@ -6,12 +6,23 @@ This script uses the Hugging Face TRL library to perform DPO, a form of
 reinforcement learning from human feedback (RLHF) that is more stable and
 computationally efficient than traditional PPO.
 """
+
+# [HARDCODED MIRROR] Force Hugging Face Hub downloads to go through a domestic mirror
+import os
+
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+
 import sys
 from pathlib import Path
 import yaml
 import torch
 import gc
+import shutil
+import time
 from datasets import load_dataset
+from huggingface_hub import list_repo_files, hf_hub_download, HfApi
+from huggingface_hub.constants import HF_HUB_CACHE
+from huggingface_hub.hf_api import RepoFile
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -19,6 +30,99 @@ from transformers import (
 )
 from peft import LoraConfig, PeftModel, PeftConfig
 from trl import DPOTrainer
+
+
+def load_dataset_robustly(repo_id: str, split: str):
+    """
+    [ULTIMATE DATA ENGINE V12.0] Intelligently validates and downloads datasets.
+    """
+    print(f"\n[Data Engine] Initializing for dataset '{repo_id}'.")
+
+    print("--> Step 1/4: Performing pre-flight check of local cache...")
+
+    local_cache_dir = Path(HF_HUB_CACHE) / f"datasets--{repo_id.replace('/', '--')}"
+    is_complete = False
+
+    try:
+        api = HfApi()
+        repo_files_info = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
+
+        def get_filename(file_info):
+            return file_info.rfilename if isinstance(file_info, RepoFile) else file_info
+
+        relevant_files = {
+            get_filename(f) for f in repo_files_info
+            if get_filename(f).endswith(('.json', '.jsonl', '.parquet', '.arrow', '.csv', '.txt',
+                                         '.py')) or "dataset_info.json" in get_filename(
+                f) or "README.md" in get_filename(f)
+        }
+
+        if not local_cache_dir.exists():
+            print("--> STATUS: Local cache directory does not exist. Full download required.")
+            files_to_download = list(relevant_files)
+        else:
+            snapshot_dir = local_cache_dir / 'snapshots'
+            if not snapshot_dir.exists():
+                print("--> STATUS: Local cache directory exists but is empty. Full download required.")
+                files_to_download = list(relevant_files)
+            else:
+                local_files_in_snapshot = {p.name for p in snapshot_dir.rglob('*') if p.is_file()}
+                is_missing = any(
+                    Path(f).name not in local_files_in_snapshot for f in relevant_files if not Path(f).is_dir())
+
+                if not is_missing:
+                    print("--> STATUS: Cache check passed. All files appear to be present. Skipping download.")
+                    is_complete = True
+                    files_to_download = []
+                else:
+                    print(f"--> STATUS: Cache incomplete. Full re-download will be triggered for safety.")
+                    files_to_download = list(relevant_files)
+
+    except Exception as e:
+        print(f"--> WARNING: Pre-flight check failed. Assuming full download is needed. Error: {e}")
+        api = HfApi()
+        repo_files_info = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
+
+        def get_filename(file_info):
+            return file_info.rfilename if isinstance(file_info, RepoFile) else file_info
+
+        files_to_download = [get_filename(info) for info in repo_files_info if get_filename(info).endswith(
+            ('.json', '.jsonl', '.parquet', '.arrow', '.csv', '.txt', '.py')) or "dataset_info.json" in get_filename(
+            info) or "README.md" in get_filename(info)]
+
+    if not is_complete:
+        print(f"\n--> Step 2/4: Starting intelligent download of {len(files_to_download)} file(s)...")
+        max_retries = 5
+        initial_wait_time = 2
+
+        for i, filename in enumerate(files_to_download):
+            for attempt in range(max_retries):
+                try:
+                    print(
+                        f"    - Downloading file {i + 1}/{len(files_to_download)}: '{filename}' (Attempt {attempt + 1}/{max_retries})...")
+                    hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset", resume_download=True)
+                    print(f"    - Successfully downloaded '{filename}'.")
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        wait_time = initial_wait_time * (2 ** attempt)
+                        print(f"    - FAILED to download '{filename}'. Error: {e}. Retrying in {wait_time} seconds...")
+                        time.sleep(wait_time)
+                    else:
+                        print(f"    - FATAL: Failed to download '{filename}' after {max_retries} attempts.")
+                        raise e
+        print("--> Intelligent download complete.")
+
+    try:
+        print(f"\n--> Step 3/4: Loading dataset '{repo_id}' from local cache...")
+        dataset = load_dataset(repo_id, split=split, download_mode="reuse_dataset_if_exists")
+        print(f"\n[Data Engine] Successfully loaded the '{split}' split.")
+        print("--> Step 4/4: Data Engine finished.")
+        return dataset
+    except Exception as e:
+        print(
+            f"--> FATAL: Failed to load dataset from cache even after download. Cache might be severely corrupted. Error: {e}")
+        sys.exit(1)
 
 
 # Factory function for data formatting
@@ -42,66 +146,53 @@ def format_dpo_dataset_factory(tokenizer):
 
 
 def run_dpo(config_path: str) -> None:
-    """
-    Main function to execute the DPO process.
-    """
     print("--- [Bedrock] Initiating Direct Preference Optimization (DPO) ---")
+    print(f"--> NOTE: Hugging Face endpoint is set to: {os.environ.get('HF_ENDPOINT')}")
 
-    # 1. Load Configuration
-    print(f"Loading configuration from: {config_path}")
+    print(f"\n[Configuration] Loading configuration from: {config_path}")
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
 
-    # 2. Load Tokenizer FIRST
     tokenizer = AutoTokenizer.from_pretrained(config['model_name_or_path'], trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     print("Tokenizer loaded successfully.")
 
-    # 3. Load and Format Dataset
-    print(f"Loading dataset: {config['dataset_name']}")
-    dataset = load_dataset(config['dataset_name'], split="train")
+    dataset = load_dataset_robustly(config['dataset_name'], split="train")
 
     if 'dataset_subset_size' in config and int(config['dataset_subset_size']) > 0:
-        dataset = dataset.select(range(int(config['dataset_subset_size'])))
+        subset_size = int(config['dataset_subset_size'])
+        dataset = dataset.select(range(subset_size))
+        print(f"--> Using a subset of {subset_size} samples for this run.")
 
     formatting_function = format_dpo_dataset_factory(tokenizer)
     dataset = dataset.map(formatting_function)
     print(f"Dataset loaded and formatted with {len(dataset)} samples.")
 
-    # [ULTIMATE FIX V7.0 - Force load into RAM]
-    # This is our last resort for the stubborn meta tensor issue on CPU.
-    # We will load the model fully into RAM, which relies on having enough virtual memory.
+    print(f"\n[Model Loading] Loading base SFT model for DPO: {config['model_name_or_path']}")
+    print("--> Using 'force load into RAM' strategy for robust CPU execution.")
 
-    print("Loading PEFT model and merging LoRA layers to force loading into RAM...")
     peft_config_for_base = PeftConfig.from_pretrained(config['model_name_or_path'])
     base_model_name = peft_config_for_base.base_model_name_or_path
 
-    # Step 1: Load the base model fully onto CPU. No device_map, no offload.
-    print(f"Loading base model '{base_model_name}' fully into RAM...")
-    base_model = AutoModelForCausalLM.from_pretrained(
-        base_model_name,
-        torch_dtype=torch.float32,  # Use float32 for CPU
-    )
-
-    # Step 2: Load the PEFT model on top of the base model
-    print("Loading PEFT adapter...")
-    model = PeftModel.from_pretrained(base_model, config['model_name_or_path'])
-
-    # Step 3: Merge the LoRA layers into the base model
-    print("Merging LoRA layers...")
+    print(f"--> Loading base model '{base_model_name}' fully into RAM for POLICY model...")
+    base_model_policy = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32)
+    print("--> Loading PEFT adapter and merging for POLICY model...")
+    model = PeftModel.from_pretrained(base_model_policy, config['model_name_or_path'])
     model = model.merge_and_unload()
+    model.config.use_cache = False
     print("POLICY model prepared and fully loaded into RAM.")
 
-    # We will not use a separate ref_model. DPOTrainer can create one from the merged model.
-    # This minimizes the memory footprint to just one full model + its copy.
-    ref_model = None
+    print(f"--> Loading base model '{base_model_name}' fully into RAM for REFERENCE model...")
+    base_model_ref = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32)
+    print("--> Loading PEFT adapter and merging for REFERENCE model...")
+    ref_model = PeftModel.from_pretrained(base_model_ref, config['model_name_or_path'])
+    ref_model = ref_model.merge_and_unload()
+    print("REFERENCE model prepared and fully loaded into RAM.")
 
-    # Garbage collect to free up memory from intermediate loading steps
     gc.collect()
 
-    # 5. Configure PEFT (LoRA) for DPO training
-    print("Configuring PEFT with LoRA for DPO training...")
+    print("\n[Configuration] Configuring PEFT with LoRA for DPO training...")
     peft_config = LoraConfig(
         r=int(config['lora_r']),
         lora_alpha=int(config['lora_alpha']),
@@ -111,8 +202,7 @@ def run_dpo(config_path: str) -> None:
         task_type="CAUSAL_LM",
     )
 
-    # 6. Configure Training Arguments
-    print("Setting up training arguments...")
+    print("[Configuration] Setting up training arguments...")
     training_args = TrainingArguments(
         output_dir=config['output_dir'],
         num_train_epochs=int(config['num_train_epochs']),
@@ -133,27 +223,28 @@ def run_dpo(config_path: str) -> None:
         remove_unused_columns=False,
     )
 
-    # 7. Initialize and Run DPO Trainer
-    print("Initializing DPOTrainer...")
+    print("\n[Trainer Init] Initializing DPOTrainer...")
     dpo_trainer = DPOTrainer(
         model=model,
-        ref_model=ref_model,  # Let TRL handle creation of the reference model from the merged model
+        ref_model=ref_model,
         args=training_args,
         train_dataset=dataset,
         tokenizer=tokenizer,
-        peft_config=peft_config,  # Re-apply LoRA to the merged model for training
+        peft_config=peft_config,
         beta=float(config['beta']),
         max_prompt_length=int(config['max_prompt_length']),
         max_length=int(config['max_length']),
     )
 
-    print("--- DPO Training Started ---")
+    print("\n--- DPO Training Started ---")
     dpo_trainer.train()
-    print("--- DPO Training Finished ---")
+    print("\n--- DPO Training Finished ---")
 
-    # 8. Save Final Adapter Model and Tokenizer
     final_model_path = Path(config['output_dir']) / "final_model"
-    print(f"Saving final DPO-tuned adapter model to {final_model_path}...")
+    # [FINAL SAVE FIX] Ensure the parent directory exists before saving.
+    os.makedirs(final_model_path, exist_ok=True)
+
+    print(f"\n[Saving] Saving final DPO-tuned adapter model to {final_model_path}...")
     dpo_trainer.save_model(str(final_model_path))
     tokenizer.save_pretrained(str(final_model_path))
     print("Model and tokenizer saved successfully.")
@@ -165,7 +256,6 @@ if __name__ == "__main__":
     if len(sys.argv) != 2:
         print("Usage: python src/trainers/dpo_trainer.py <path_to_config.yaml>")
         sys.exit(1)
-
     config_file_path = sys.argv[1]
     run_dpo(config_file_path)
 

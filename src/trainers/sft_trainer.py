@@ -7,83 +7,154 @@ using Parameter-Efficient Fine-Tuning (PEFT) with LoRA. It is designed to be
 driven by a YAML configuration file.
 """
 
+# [HARDCODED MIRROR] Force Hugging Face Hub downloads to go through a domestic mirror
+import os
+
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+
 import sys
 from pathlib import Path
 import yaml
 import torch
+import gc
+import shutil
+import time
 from datasets import load_dataset
+from huggingface_hub import list_repo_files, hf_hub_download, HfApi
+from huggingface_hub.constants import HF_HUB_CACHE
+from huggingface_hub.hf_api import RepoFile
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     TrainingArguments,
-    BitsAndBytesConfig,
 )
 from peft import LoraConfig
 from trl import SFTTrainer
 
 
+def load_dataset_robustly(repo_id: str, split: str):
+    """
+    [ULTIMATE DATA ENGINE V12.0] Intelligently validates and downloads datasets.
+    """
+    print(f"\n[Data Engine] Initializing for dataset '{repo_id}'.")
+
+    print("--> Step 1/4: Performing pre-flight check of local cache...")
+
+    local_cache_dir = Path(HF_HUB_CACHE) / f"datasets--{repo_id.replace('/', '--')}"
+    is_complete = False
+
+    try:
+        api = HfApi()
+        repo_files_info = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
+
+        def get_filename(file_info):
+            return file_info.rfilename if isinstance(file_info, RepoFile) else file_info
+
+        relevant_files = {
+            get_filename(f) for f in repo_files_info
+            if get_filename(f).endswith(('.json', '.jsonl', '.parquet', '.arrow', '.csv', '.txt',
+                                         '.py')) or "dataset_info.json" in get_filename(
+                f) or "README.md" in get_filename(f)
+        }
+
+        if not local_cache_dir.exists():
+            print("--> STATUS: Local cache directory does not exist. Full download required.")
+            files_to_download = list(relevant_files)
+        else:
+            snapshot_dir = local_cache_dir / 'snapshots'
+            if not snapshot_dir.exists():
+                print("--> STATUS: Local cache directory exists but is empty. Full download required.")
+                files_to_download = list(relevant_files)
+            else:
+                local_files_in_snapshot = {p.name for p in snapshot_dir.rglob('*') if p.is_file()}
+                is_missing = any(
+                    Path(f).name not in local_files_in_snapshot for f in relevant_files if not Path(f).is_dir())
+
+                if not is_missing:
+                    print("--> STATUS: Cache check passed. All files appear to be present. Skipping download.")
+                    is_complete = True
+                    files_to_download = []
+                else:
+                    print(f"--> STATUS: Cache incomplete. Full re-download will be triggered for safety.")
+                    files_to_download = list(relevant_files)
+
+    except Exception as e:
+        print(f"--> WARNING: Pre-flight check failed. Assuming full download is needed. Error: {e}")
+        api = HfApi()
+        repo_files_info = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
+
+        def get_filename(file_info):
+            return file_info.rfilename if isinstance(file_info, RepoFile) else file_info
+
+        files_to_download = [get_filename(info) for info in repo_files_info if get_filename(info).endswith(
+            ('.json', '.jsonl', '.parquet', '.arrow', '.csv', '.txt', '.py')) or "dataset_info.json" in get_filename(
+            info) or "README.md" in get_filename(info)]
+
+    if not is_complete:
+        print(f"\n--> Step 2/4: Starting intelligent download of {len(files_to_download)} file(s)...")
+        max_retries = 5
+        initial_wait_time = 2
+
+        for i, filename in enumerate(files_to_download):
+            for attempt in range(max_retries):
+                try:
+                    print(
+                        f"    - Downloading file {i + 1}/{len(files_to_download)}: '{filename}' (Attempt {attempt + 1}/{max_retries})...")
+                    hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset", resume_download=True)
+                    print(f"    - Successfully downloaded '{filename}'.")
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        wait_time = initial_wait_time * (2 ** attempt)
+                        print(f"    - FAILED to download '{filename}'. Error: {e}. Retrying in {wait_time} seconds...")
+                        time.sleep(wait_time)
+                    else:
+                        print(f"    - FATAL: Failed to download '{filename}' after {max_retries} attempts.")
+                        raise e
+        print("--> Intelligent download complete.")
+
+    try:
+        print(f"\n--> Step 3/4: Loading dataset '{repo_id}' from local cache...")
+        dataset = load_dataset(repo_id, split=split, download_mode="reuse_dataset_if_exists")
+        print(f"\n[Data Engine] Successfully loaded the '{split}' split.")
+        print("--> Step 4/4: Data Engine finished.")
+        return dataset
+    except Exception as e:
+        print(
+            f"--> FATAL: Failed to load dataset from cache even after download. Cache might be severely corrupted. Error: {e}")
+        sys.exit(1)
+
+
 def run_sft(config_path: str) -> None:
     """
     Main function to execute the SFT process.
-
-    Args:
-        config_path: Path to the YAML configuration file.
     """
     print("--- [Bedrock] Initiating Supervised Fine-Tuning (SFT) ---")
+    print(f"--> NOTE: Hugging Face endpoint is set to: {os.environ.get('HF_ENDPOINT')}")
 
-    # 1. Load Configuration
-    print(f"Loading configuration from: {config_path}")
+    print(f"\n[Configuration] Loading configuration from: {config_path}")
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
 
-    # 2. Load Dataset
-    print(f"Loading dataset: {config['dataset_name']}")
-    dataset = load_dataset(config['dataset_name'], split="train")
+    dataset = load_dataset_robustly(config['dataset_name'], split="train")
 
-    # [MODIFIED FOR CPU SPEED] Add a config option to subset the dataset for faster runs
     if 'dataset_subset_size_cpu' in config and int(config['dataset_subset_size_cpu']) > 0:
         subset_size = int(config['dataset_subset_size_cpu'])
-        print(f"CPU mode: Subsetting dataset to first {subset_size} samples for speed.")
+        print(f"--> Using a subset of {subset_size} samples for this run.")
         dataset = dataset.select(range(subset_size))
 
     print(f"Dataset loaded with {len(dataset)} samples.")
 
-    # 3. Load Model and Tokenizer
-    print(f"Loading base model: {config['model_name_or_path']}")
+    print(f"\n[Model Loading] Loading base model for SFT: {config['model_name_or_path']}")
 
     device_map = {"": "cpu"}
-    quant_config = None
     torch_dtype = torch.float32
     attn_implementation = "sdpa"
 
-    if torch.cuda.is_available():
-        print("GPU detected. Preparing for GPU execution.")
-        device_map = "auto"
-        use_quantization = config.get('optim') == 'paged_adamw_8bit'
-
-        if use_quantization:
-            print("Applying 4-bit quantization for GPU.")
-            compute_dtype = torch.float16
-            if config.get('bf16', False) and torch.cuda.get_device_capability()[0] >= 8:
-                compute_dtype = torch.bfloat16
-
-            quant_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=compute_dtype,
-                bnb_4bit_use_double_quant=True,
-            )
-            torch_dtype = compute_dtype
-
-        if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8:
-            attn_implementation = "flash_attention_2"
-            print("Using Flash Attention 2 for compatible GPU.")
-    else:
-        print("No GPU detected. Configuring for CPU-only execution.")
+    print("--> No GPU detected. Configuring for CPU-only execution.")
 
     model = AutoModelForCausalLM.from_pretrained(
         config['model_name_or_path'],
-        quantization_config=quant_config,
         device_map=device_map,
         trust_remote_code=True,
         attn_implementation=attn_implementation,
@@ -102,9 +173,9 @@ def run_sft(config_path: str) -> None:
     tokenizer.padding_side = "right"
 
     print("Model and tokenizer loaded successfully.")
+    gc.collect()
 
-    # 4. Configure PEFT (LoRA)
-    print("Configuring PEFT with LoRA...")
+    print("\n[Configuration] Configuring PEFT with LoRA...")
     peft_config = LoraConfig(
         r=int(config['lora_r']),
         lora_alpha=int(config['lora_alpha']),
@@ -115,8 +186,7 @@ def run_sft(config_path: str) -> None:
     )
     print("PEFT configured.")
 
-    # 5. Configure Training Arguments
-    print("Setting up training arguments...")
+    print("[Configuration] Setting up training arguments...")
     training_args = TrainingArguments(
         output_dir=config['output_dir'],
         num_train_epochs=int(config['num_train_epochs']),
@@ -127,8 +197,8 @@ def run_sft(config_path: str) -> None:
         logging_steps=int(config['logging_steps']),
         learning_rate=float(config['learning_rate']),
         weight_decay=float(config['weight_decay']),
-        fp16=config.get('fp16', False) and torch.cuda.is_available(),
-        bf16=config.get('bf16', False) and torch.cuda.is_available(),
+        fp16=False,
+        bf16=False,
         max_grad_norm=float(config['max_grad_norm']),
         max_steps=int(config['max_steps']),
         warmup_ratio=float(config['warmup_ratio']),
@@ -138,8 +208,7 @@ def run_sft(config_path: str) -> None:
     )
     print("Training arguments set.")
 
-    # 6. Initialize and Run Trainer
-    print("Initializing SFTTrainer...")
+    print("\n[Trainer Init] Initializing SFTTrainer...")
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
@@ -151,13 +220,15 @@ def run_sft(config_path: str) -> None:
         packing=True,
     )
 
-    print("--- Training Started ---")
+    print("\n--- SFT Training Started ---")
     trainer.train()
-    print("--- Training Finished ---")
+    print("\n--- SFT Training Finished ---")
 
-    # 7. Save Final Adapter Model and Tokenizer
     final_model_path = Path(config['output_dir']) / "final_model"
-    print(f"Saving final adapter model to {final_model_path}...")
+    # [FINAL SAVE FIX] Ensure the parent directory exists before saving.
+    os.makedirs(final_model_path, exist_ok=True)
+
+    print(f"\n[Saving] Saving final adapter model to {final_model_path}...")
     trainer.save_model(str(final_model_path))
     tokenizer.save_pretrained(str(final_model_path))
     print("Model and tokenizer saved successfully.")
