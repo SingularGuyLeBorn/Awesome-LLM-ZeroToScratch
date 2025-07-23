@@ -41,6 +41,8 @@ class BaseLLMConfig(PretrainedConfig):
             tie_word_embeddings=True,
             is_decoder=True,
             is_encoder_decoder=False,
+            # [FIX] Add use_cache to be compatible with HF .generate()
+            use_cache=True,
             # MoE Params
             num_experts=8,
             num_experts_per_tok=2,
@@ -67,9 +69,17 @@ class BaseLLMConfig(PretrainedConfig):
         self.is_vlm = is_vlm
         self.num_image_tokens = num_image_tokens
         self.vision_encoder_output_dim = vision_encoder_output_dim
+        # [FIX] Set the use_cache attribute
+        self.use_cache = use_cache
 
-        super().__init__(tie_word_embeddings=tie_word_embeddings, is_decoder=is_decoder,
-                         is_encoder_decoder=is_encoder_decoder, **kwargs)
+        super().__init__(
+            tie_word_embeddings=tie_word_embeddings,
+            is_decoder=is_decoder,
+            is_encoder_decoder=is_encoder_decoder,
+            # [FIX] Pass use_cache to the parent class as well
+            use_cache=use_cache,
+            **kwargs
+        )
 
 
 class VisionEncoderDummy(nn.Module):

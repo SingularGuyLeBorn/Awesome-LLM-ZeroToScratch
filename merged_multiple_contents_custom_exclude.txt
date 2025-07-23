@@ -108,7 +108,6 @@ PROJECT_STRUCTURE: List[str] = [
     "src/trainers/sft_trainer.py",
     "src/trainers/dpo_trainer.py",
     "src/utils/__init__.py",
-    "src/utils/data_formatters.py",  # Added for data formatting utils
     "src/inference/__init__.py",  # Added for completeness in structure generation
     "src/inference/inference.py",  # Added for completeness in structure generation
     "src/evaluation/__init__.py",  # Added for completeness in structure generation
@@ -301,50 +300,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-DATA_FORMATTERS_CONTENT: str = """
-# FILE: src/utils/data_formatters.py
-\"\"\"
-Bedrock Protocol: Centralized Data Formatting Utilities.
-This module provides reusable functions for formatting datasets for various
-training paradigms (SFT, DPO, ORPO, etc.), promoting code reuse and
-decoupling trainers.
-\"\"\"
-from transformers import AutoTokenizer
-
-def format_dpo_dataset_factory(tokenizer: AutoTokenizer):
-    \"\"\"
-    Creates a formatting function for preference datasets (DPO, ORPO, RM).
-    This function is designed to work with datasets that follow the TRL
-    chat format, where 'chosen' and 'rejected' fields contain a list of
-    message dictionaries.
-
-    Args:
-        tokenizer: The tokenizer to use for applying the chat template.
-
-    Returns:
-        A function that takes a dataset example and returns a dictionary
-        with 'prompt', 'chosen', and 'rejected' as formatted strings.
-    \"\"\"
-    def format_dpo_dataset(example: dict) -> dict:
-        # The prompt is the conversation history *before* the final turn.
-        prompt_messages = example['chosen'][:-1]
-        # The chosen response is the full conversation including the final preferred response.
-        chosen_messages = example['chosen']
-        # The rejected response is the full conversation including the final rejected response.
-        rejected_messages = example['rejected']
-
-        prompt_str = tokenizer.apply_chat_template(prompt_messages, tokenize=False, add_generation_prompt=True)
-        chosen_str = tokenizer.apply_chat_template(chosen_messages, tokenize=False)
-        rejected_str = tokenizer.apply_chat_template(rejected_messages, tokenize=False)
-
-        return {
-            "prompt": prompt_str,
-            "chosen": chosen_str,
-            "rejected": rejected_str,
-        }
-    return format_dpo_dataset
-"""
-
 
 def main() -> None:
     """
@@ -395,11 +350,6 @@ def main() -> None:
     license_path = root_path / "LICENSE"
     license_path.write_text(LICENSE_CONTENT.strip())
     print(f"  - Wrote content to {license_path}")
-
-    # Write data_formatters.py
-    data_formatters_path = root_path / "src/utils/data_formatters.py"
-    data_formatters_path.write_text(DATA_FORMATTERS_CONTENT.strip())
-    print(f"  - Wrote content to {data_formatters_path}")
 
     # Fill __init__.py files to make packages importable
     for file_path_str in PROJECT_STRUCTURE:
@@ -677,11 +627,6 @@ UV_MIRROR_ARGS="--extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple --ext
 # 修正：增加 --index-strategy unsafe-best-match 参数
 uv pip install -r requirements.txt $UV_MIRROR_ARGS --index-strategy unsafe-best-match
 echo "--- Core dependencies installed successfully."
-
-# --- [CRITICAL FIX] Step 3.5: Upgrade TRL to get latest features like GRPO ---
-echo "[3.5/5] Upgrading TRL to the latest version..."
-uv pip install -U trl
-echo "--- TRL upgraded successfully."
 
 
 # --- Step 4: Robustly Download Flash Attention ---
@@ -977,115 +922,6 @@ run_name: "dpo-tinyllama-guanaco-demo-cpu"
 # END OF FILE: configs/training/finetune_dpo.yaml
 
 ====================
-文件: .\configs\training\finetune_grpo.yaml
-====================
-
-# FILE: configs/training/finetune_grpo.yaml
-# Bedrock Protocol: Configuration for Group Relative Policy Optimization (GRPO).
-
-# --- Model & Tokenizer ---
-# GRPO also starts from a supervised fine-tuned (SFT) model.
-model_name_or_path: "./checkpoints/sft-tinyllama-guanaco-cpu/final_model" # Points to the CPU-trained adapter
-use_fast_tokenizer: true
-
-# --- Dataset ---
-# GRPO uses a prompt dataset, similar to PPO.
-dataset_name: "imdb"
-dataset_text_field: "text"
-dataset_subset_size: 20 # Keep it small for a quick CPU run
-
-# --- GRPO Specific Parameters (TRL GRPOConfig) ---
-# This is the core of GRPO: for each prompt, generate this many responses to form a group.
-num_generations: 4
-# Total optimization steps. Should be multiple of dataset_subset_size / batch_size.
-grpo_steps: 5
-learning_rate: 1e-5
-batch_size: 1 # Number of prompts per batch
-gradient_accumulation_steps: 1
-beta: 0.1 # KL divergence coefficient
-epsilon: 0.2 # PPO-like clipping parameter
-
-# --- Generation Parameters for GRPO Rollouts ---
-max_new_tokens: 32
-min_length: -1 # TRL default
-temperature: 0.7
-top_k: 0.0
-top_p: 1.0
-
-# --- General Training & Experiment Tracking ---
-output_dir: "./checkpoints/grpo-tinyllama-imdb-cpu"
-seed: 42
-
-# --- PEFT Configuration (LoRA for GRPO Actor) ---
-lora_r: 16
-lora_alpha: 32
-lora_dropout: 0.05
-lora_target_modules:
-  - "q_proj"
-  - "k_proj"
-  - "v_proj"
-  - "o_proj"
-
-# --- Experiment Tracking ---
-run_name: "grpo-tinyllama-imdb-demo-cpu"
-report_to: "none"
-
-# END OF FILE: configs/training/finetune_grpo.yaml
-
-====================
-文件: .\configs\training\finetune_orpo.yaml
-====================
-
-# FILE: configs/training/finetune_orpo.yaml
-# Bedrock Protocol: Configuration for Odds Ratio Preference Optimization (ORPO).
-
-# --- Model & Tokenizer ---
-# ORPO starts from a base model (does not require SFT first like DPO/PPO)
-model_name_or_path: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-use_fast_tokenizer: true
-
-# --- Dataset ---
-# ORPO uses a mixed SFT + Preference dataset or just preference data.
-# We'll use the same preference dataset as DPO for consistency in this demo.
-dataset_name: "trl-internal-testing/hh-rlhf-trl-style"
-dataset_subset_size: 20 # For quick CPU test
-
-# --- ORPO Specific Parameters ---
-beta: 0.1 # ORPO's odds ratio beta parameter
-
-# --- Training Arguments ---
-output_dir: "./checkpoints/orpo-tinyllama-mixed"
-num_train_epochs: 1
-per_device_train_batch_size: 1
-per_device_eval_batch_size: 1
-gradient_accumulation_steps: 1
-optim: "adamw_torch"
-learning_rate: 5e-5
-weight_decay: 0.001
-max_grad_norm: 1.0
-logging_steps: 1
-max_steps: 2 # For quick CPU test
-lr_scheduler_type: "linear"
-report_to: "none"
-run_name: "orpo-tinyllama-mixed-demo"
-
-# --- Tokenization Parameters ---
-max_length: 256
-max_prompt_length: 128
-
-# --- PEFT Configuration (LoRA for ORPO) ---
-lora_r: 16
-lora_alpha: 32
-lora_dropout: 0.05
-lora_target_modules:
-  - "q_proj"
-  - "k_proj"
-  - "v_proj"
-  - "o_proj"
-
-# END OF FILE: configs/training/finetune_orpo.yaml
-
-====================
 文件: .\configs\training\finetune_ppo.yaml
 ====================
 
@@ -1107,10 +943,9 @@ dataset_subset_size: 20
 # [MODIFIED] Increased steps slightly for more meaningful run
 ppo_steps: 4
 learning_rate: 1.41e-5
+# [MODIFIED] Increased batch_size to >= 2 to eliminate the 'std' UserWarning
 batch_size: 2
-# [FIX] Set mini_batch_size to be >= 2 to avoid 'var: nan' in logs.
-# It should be a divisor of batch_size.
-mini_batch_size: 2
+mini_batch_size: 1
 gradient_accumulation_steps: 1
 ppo_epochs: 4
 init_kl_coef: 0.2
@@ -1273,115 +1108,7 @@ run_name: "pretrain-0.5b-dense-demo" # Unique name for your W&B run.
 文件: .\configs\training\pretrain_llm_resume.yaml
 ====================
 
-# FILE: configs/training/pretrain_llm_resume.yaml
-# Bedrock Protocol: Configuration for resuming LLM/VLM pre-training.
-# This file centralizes all training-related hyperparameters and strategies.
 
-# --- Global Training Settings ---
-seed: 42
-output_dir: "./checkpoints/pretrain_llm_resume_demo" # Output directory for this resumed run
-save_steps: 1 # Checkpoint interval. Set to -1 to only save at the end.
-logging_steps: 1 # Log every X steps.
-eval_steps: 1 # Evaluate every X steps.
-max_steps: 5 # Total training steps. Set to -1 to train for num_train_epochs.
-num_train_epochs: -1 # If max_steps > 0, this is ignored. Set to 1 for a quick demo epoch.
-
-# --- Model Configuration ---
-# Path to the specific model architecture YAML used for the initial pre-training.
-# This is used if not resuming from a full model checkpoint.
-model_config_path: "configs/model/0.5B_dense.yaml"
-
-# [NEW] Resume from checkpoint
-# Specify the path to the model checkpoint you want to resume from.
-# This should be a directory containing `config.json` and `model.safetensors` (or `pytorch_model.bin`).
-# Example: "./checkpoints/pretrain_llm_demo/final_model" or "./checkpoints/pretrain_llm_demo/step_X"
-resume_from_checkpoint: "./checkpoints/pretrain_llm_demo/final_model"
-# If resuming, 'model_config_path' is ignored for model loading, but used for tokenizer.
-# model_name_or_path points to the tokenizer, which usually comes with the checkpoint.
-model_name_or_path: "${resume_from_checkpoint}" # Tokenizer path for resumed models.
-
-# --- Data Configuration ---
-dataset_dir: "./data/processed/wikitext"
-dataset_text_field: "text"
-max_seq_length: 1024
-
-# --- Optimizer ---
-optimizer: "adamw_torch"
-learning_rate: 1e-4 # Often lower for resumed training
-weight_decay: 0.01
-adam_beta1: 0.9
-adam_beta2: 0.95
-adam_epsilon: 1e-8
-max_grad_norm: 1.0
-
-# --- Learning Rate Scheduler ---
-lr_scheduler_type: "cosine"
-warmup_ratio: 0.01
-
-# --- Batching & Parallelism (CPU friendly) ---
-per_device_train_batch_size: 1
-gradient_accumulation_steps: 1
-mixed_precision: "no" # "no" for CPU
-
-# --- Experiment Tracking ---
-report_to: "none"
-run_name: "pretrain-0.5b-dense-resume-demo"
-
-# END OF FILE: configs/training/pretrain_llm_resume.yaml
-
-====================
-文件: .\configs\training\train_reward_model.yaml
-====================
-
-# FILE: configs/training/train_reward_model.yaml
-# Bedrock Protocol: Configuration for Training a Reward Model (RM).
-
-# --- Model & Tokenizer ---
-# Base model for the Reward Model. Can be a pre-trained LLM (e.g., TinyLlama)
-# or an SFT-tuned model. Usually a smaller model is sufficient for RM.
-model_name_or_path: "TinyLlama/TinyLlama-1.1B-Chat-v1.0" # Start with a base model or SFT model.
-use_fast_tokenizer: true
-
-# --- Dataset ---
-# Preference dataset for RM training (same as DPO)
-dataset_name: "trl-internal-testing/hh-rlhf-trl-style"
-dataset_subset_size: 200 # For quick CPU test, use a larger subset for better RM training
-
-# --- Tokenization ---
-# [FIX] Added max_length for the tokenizer preprocessing step.
-max_length: 512 # Max sequence length for prompt + response.
-
-# --- Training Arguments for RewardTrainer ---
-output_dir: "./checkpoints/reward-model-tinyllama-hh"
-num_train_epochs: 1
-per_device_train_batch_size: 1
-per_device_eval_batch_size: 1
-gradient_accumulation_steps: 1
-optim: "adamw_torch"
-learning_rate: 1e-5 # Typically smaller for RM
-weight_decay: 0.001
-max_grad_norm: 1.0
-logging_steps: 10
-max_steps: 10 # For quick CPU test
-lr_scheduler_type: "cosine"
-report_to: "none" # Can change to "wandb" for tracking
-run_name: "reward-model-tinyllama-hh-demo"
-
-# --- PEFT Configuration (LoRA for RM) ---
-lora_r: 8
-lora_alpha: 16
-lora_dropout: 0.05
-# Target modules for LoRA in a sequence classification model
-lora_target_modules:
-  - "q_proj"
-  - "k_proj"
-  - "v_proj"
-  - "o_proj"
-  # The linear layer for classification is typically named "score" by TRL
-  # or can be the last linear layer of the model if not PEFT-tuned before.
-  - "score"
-
-# END OF FILE: configs/training/train_reward_model.yaml
 
 ====================
 文件: .\data_processing\build_tokenizer.py
@@ -2455,25 +2182,6 @@ echo "--- [Bedrock] Evaluation script finished. ---"
 # END OF FILE: scripts/run_evaluation.sh
 
 ====================
-文件: .\scripts\run_grpo.sh
-====================
-
-# FILE: scripts/run_grpo.sh
-# Bedrock Protocol: One-click script to launch the GRPO process.
-set -e
-
-echo "--- [Bedrock] Launching GRPO Trainer ---"
-
-# This script launches the GRPO trainer.
-# It uses an SFT model as a starting point.
-
-accelerate launch src/trainers/grpo_trainer.py configs/training/finetune_grpo.yaml
-
-echo "--- [Bedrock] GRPO script finished. ---"
-
-# END OF FILE: scripts/run_grpo.sh
-
-====================
 文件: .\scripts\run_inference.sh
 ====================
 
@@ -2497,25 +2205,6 @@ python src/inference/inference.py "$MODEL_PATH" "$MAX_NEW_TOKENS"
 
 echo "--- [Bedrock] Inference script finished. ---"
 # END OF FILE: scripts/run_inference.sh
-
-====================
-文件: .\scripts\run_orpo.sh
-====================
-
-# FILE: scripts/run_orpo.sh
-#!/bin/bash
-# Bedrock Protocol: One-click script to launch the ORPO process.
-set -e
-
-echo "--- [Bedrock] Launching ORPO Trainer ---"
-
-# This script launches the ORPO trainer.
-# Ensure the configuration file points to the correct base model and dataset.
-
-accelerate launch src/trainers/orpo_trainer.py configs/training/finetune_orpo.yaml
-
-echo "--- [Bedrock] ORPO training finished. ---"
-# END OF FILE: scripts/run_orpo.sh
 
 ====================
 文件: .\scripts\run_ppo.sh
@@ -2574,25 +2263,6 @@ echo "--- [Bedrock] Pre-training script finished. ---"
 # END OF FILE: scripts/run_pretrain.sh
 
 ====================
-文件: .\scripts\run_reward_model_trainer.sh
-====================
-
-# FILE: scripts/run_reward_model_trainer.sh
-#!/bin/bash
-# Bedrock Protocol: One-click script to launch the Reward Model training process.
-set -e
-
-echo "--- [Bedrock] Launching Reward Model Trainer ---"
-
-# This script launches the Reward Model trainer.
-# Ensure the configuration file points to the correct base model and dataset.
-
-accelerate launch src/trainers/reward_model_trainer.py configs/training/train_reward_model.yaml
-
-echo "--- [Bedrock] Reward Model training finished. ---"
-# END OF FILE: scripts/run_reward_model_trainer.sh
-
-====================
 文件: .\scripts\run_sft.sh
 ====================
 
@@ -2619,16 +2289,17 @@ echo "--- [Bedrock] SFT script finished. ---"
 # FILE: src/__init__.py
 # Bedrock: This file makes the directory a Python package.
 
-# Mandate of Zero Ambiguity: By making this file minimal, we prevent
-# unintended side-effects from cascading imports. Specific components
-# should be imported directly from their modules, for example:
-# `from src.trainers.dpo_trainer import run_dpo`
-# This ensures that running one script does not load all other scripts,
-# making the system more modular and robust.
+# Mandate of Zero Ambiguity: Expose top-level components for direct import.
+from .models.language_model import BaseLLM
+from .trainers.pretrain_trainer import run_pretrain
+from .trainers.sft_trainer import run_sft
+from .trainers.dpo_trainer import run_dpo
+from .trainers.ppo_trainer import run_ppo
+from .inference.inference import run_inference_cli
+# [API IMPORT FIX] Removed 'run_evaluation' as it's no longer a direct export.
+# from .evaluation.evaluate_llm import run_evaluation # Removed
 
-# We can still register our custom models here, as this is a safe,
-# project-wide operation.
-from . import models
+# END OF FILE: src/__init__.py
 
 ====================
 文件: .\src\evaluation\evaluate_llm.py
@@ -3920,17 +3591,10 @@ from huggingface_hub.hf_api import RepoFile
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    TrainingArguments,
 )
 from peft import LoraConfig, PeftModel, PeftConfig
-from trl import DPOTrainer, DPOConfig
-
-# Ensure project root is in path for imports if running as a script
-script_path = Path(__file__).resolve()
-project_root = script_path.parent.parent.parent
-if str(project_root) not in sys.path:
-    sys.path.append(str(project_root))
-
-from src.utils.data_formatters import format_dpo_dataset_factory
+from trl import DPOTrainer
 
 
 def load_dataset_robustly(repo_id: str, split: str):
@@ -4024,6 +3688,26 @@ def load_dataset_robustly(repo_id: str, split: str):
         print(
             f"--> FATAL: Failed to load dataset from cache even after download. Cache might be severely corrupted. Error: {e}")
         sys.exit(1)
+
+
+# Factory function for data formatting
+def format_dpo_dataset_factory(tokenizer):
+    def format_dpo_dataset(example: dict) -> dict:
+        prompt_messages = example['chosen'][:-1]
+        chosen_messages = example['chosen']
+        rejected_messages = example['rejected']
+
+        prompt_str = tokenizer.apply_chat_template(prompt_messages, tokenize=False, add_generation_prompt=True)
+        chosen_str = tokenizer.apply_chat_template(chosen_messages, tokenize=False)
+        rejected_str = tokenizer.apply_chat_template(rejected_messages, tokenize=False)
+
+        return {
+            "prompt": prompt_str,
+            "chosen": chosen_str,
+            "rejected": rejected_str,
+        }
+
+    return format_dpo_dataset
 
 
 def run_dpo(config_path: str) -> None:
@@ -4064,9 +3748,13 @@ def run_dpo(config_path: str) -> None:
     model.config.use_cache = False
     print("POLICY model prepared and fully loaded into RAM.")
 
-    # [API UPDATE FIX] REMOVED the manual creation of the reference model.
-    # TRL will automatically create an internal reference model from the 'model'
-    # before applying the new PEFT adapter for DPO training.
+    print(f"--> Loading base model '{base_model_name}' fully into RAM for REFERENCE model...")
+    base_model_ref = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32)
+    print("--> Loading PEFT adapter and merging for REFERENCE model...")
+    ref_model = PeftModel.from_pretrained(base_model_ref, config['model_name_or_path'])
+    ref_model = ref_model.merge_and_unload()
+    print("REFERENCE model prepared and fully loaded into RAM.")
+
     gc.collect()
 
     print("\n[Configuration] Configuring PEFT with LoRA for DPO training...")
@@ -4080,8 +3768,7 @@ def run_dpo(config_path: str) -> None:
     )
 
     print("[Configuration] Setting up training arguments...")
-    # [API UPDATE FIX] Use DPOConfig to wrap training arguments for TRL
-    training_args = DPOConfig(
+    training_args = TrainingArguments(
         output_dir=config['output_dir'],
         num_train_epochs=int(config['num_train_epochs']),
         per_device_train_batch_size=int(config['per_device_train_batch_size']),
@@ -4090,8 +3777,8 @@ def run_dpo(config_path: str) -> None:
         optim=config['optim'],
         learning_rate=float(config['learning_rate']),
         weight_decay=float(config.get('weight_decay', 0.0)),
-        fp16=False,
         bf16=False,
+        fp16=False,
         max_grad_norm=float(config['max_grad_norm']),
         logging_steps=int(config['logging_steps']),
         max_steps=int(config['max_steps']),
@@ -4099,22 +3786,19 @@ def run_dpo(config_path: str) -> None:
         report_to=config['report_to'],
         run_name=config['run_name'],
         remove_unused_columns=False,
-        # DPO-specific arguments
-        beta=float(config['beta']),
-        max_prompt_length=int(config['max_prompt_length']),
-        max_length=int(config['max_length']),
     )
 
     print("\n[Trainer Init] Initializing DPOTrainer...")
     dpo_trainer = DPOTrainer(
         model=model,
-        # [API UPDATE FIX] Pass ref_model=None as required by the new TRL API
-        # when using PEFT.
-        ref_model=None,
+        ref_model=ref_model,
         args=training_args,
         train_dataset=dataset,
         tokenizer=tokenizer,
         peft_config=peft_config,
+        beta=float(config['beta']),
+        max_prompt_length=int(config['max_prompt_length']),
+        max_length=int(config['max_length']),
     )
 
     print("\n--- DPO Training Started ---")
@@ -4122,6 +3806,7 @@ def run_dpo(config_path: str) -> None:
     print("\n--- DPO Training Finished ---")
 
     final_model_path = Path(config['output_dir']) / "final_model"
+    # [FINAL SAVE FIX] Ensure the parent directory exists before saving.
     os.makedirs(final_model_path, exist_ok=True)
 
     print(f"\n[Saving] Saving final DPO-tuned adapter model to {final_model_path}...")
@@ -4140,571 +3825,6 @@ if __name__ == "__main__":
     run_dpo(config_file_path)
 
 # END OF FILE: src/trainers/dpo_trainer.py
-
-====================
-文件: .\src\trainers\grpo_trainer.py
-====================
-
-# FILE: src/trainers/grpo_trainer.py
-"""
-Bedrock Protocol: Group Relative Policy Optimization (GRPO) Trainer.
-
-This script provides a full, runnable implementation for the GRPO algorithm,
-a value-free reinforcement learning technique for aligning language models.
-"""
-
-# [HARDCODED MIRROR] Force Hugging Face Hub downloads to go through a domestic mirror
-import os
-
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-
-import sys
-from pathlib import Path
-import yaml
-import torch
-import gc
-import shutil
-import time
-from datasets import load_dataset
-from huggingface_hub import list_repo_files, hf_hub_download, HfApi
-from huggingface_hub.constants import HF_HUB_CACHE
-from huggingface_hub.hf_api import RepoFile
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-)
-from peft import LoraConfig, PeftModel, PeftConfig, get_peft_model
-# [FIX] Import GRPOConfig from the correct location if needed, and handle potential future changes
-try:
-    from trl import GRPOConfig, GRPOTrainer, GenerationConfig, AutoModelForCausalLMWithValueHead
-except ImportError:
-    print("Warning: Could not import GRPOConfig. This might happen with older TRL versions.")
-    print("Attempting to fall back to a generic config object if possible, but an upgrade is recommended.")
-    # Fallback for older versions, though this may not work perfectly
-    from trl import PPOConfig as GRPOConfig
-    from trl import GRPOTrainer, GenerationConfig, AutoModelForCausalLMWithValueHead
-
-
-# Ensure project root is in path for imports
-script_path = Path(__file__).resolve()
-project_root = script_path.parent.parent.parent
-if str(project_root) not in sys.path:
-    sys.path.append(str(project_root))
-
-
-def load_dataset_robustly(repo_id: str, split: str):
-    """
-    [ULTIMATE DATA ENGINE V12.0] Intelligently validates and downloads datasets.
-    """
-    print(f"\n[Data Engine] Initializing for dataset '{repo_id}'.")
-
-    print("--> Step 1/4: Performing pre-flight check of local cache...")
-
-    local_cache_dir = Path(HF_HUB_CACHE) / f"datasets--{repo_id.replace('/', '--')}"
-    is_complete = False
-
-    try:
-        api = HfApi()
-        repo_files_info = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
-
-        def get_filename(file_info):
-            return file_info.rfilename if isinstance(file_info, RepoFile) else file_info
-
-        relevant_files = {
-            get_filename(f) for f in repo_files_info
-            if get_filename(f).endswith(('.json', '.jsonl', '.parquet', '.arrow', '.csv', '.txt',
-                                         '.py')) or "dataset_info.json" in get_filename(
-                f) or "README.md" in get_filename(f)
-        }
-
-        if not local_cache_dir.exists():
-            print("--> STATUS: Local cache directory does not exist. Full download required.")
-            files_to_download = list(relevant_files)
-        else:
-            snapshot_dir = local_cache_dir / 'snapshots'
-            if not snapshot_dir.exists():
-                print("--> STATUS: Local cache directory exists but is empty. Full download required.")
-                files_to_download = list(relevant_files)
-            else:
-                local_files_in_snapshot = {p.name for p in snapshot_dir.rglob('*') if p.is_file()}
-                is_missing = any(
-                    Path(f).name not in local_files_in_snapshot for f in relevant_files if not Path(f).is_dir())
-
-                if not is_missing:
-                    print("--> STATUS: Cache check passed. All files appear to be present. Skipping download.")
-                    is_complete = True
-                    files_to_download = []
-                else:
-                    print(f"--> STATUS: Cache incomplete. Full re-download will be triggered for safety.")
-                    files_to_download = list(relevant_files)
-
-
-    except Exception as e:
-        print(f"--> WARNING: Pre-flight check failed. Assuming full download is needed. Error: {e}")
-        api = HfApi()
-        repo_files_info = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
-
-        def get_filename(file_info):
-            return file_info.rfilename if isinstance(file_info, RepoFile) else file_info
-
-        files_to_download = [get_filename(info) for info in repo_files_info if get_filename(info).endswith(
-            ('.json', '.jsonl', '.parquet', '.arrow', '.csv', '.txt', '.py')) or "dataset_info.json" in get_filename(
-            info) or "README.md" in get_filename(info)]
-
-    if not is_complete:
-        print(f"\n--> Step 2/4: Starting intelligent download of {len(files_to_download)} file(s)...")
-        max_retries = 5
-        initial_wait_time = 2
-
-        for i, filename in enumerate(files_to_download):
-            for attempt in range(max_retries):
-                try:
-                    print(
-                        f"    - Downloading file {i + 1}/{len(files_to_download)}: '{filename}' (Attempt {attempt + 1}/{max_retries})...")
-                    hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset", resume_download=True)
-                    print(f"    - Successfully downloaded '{filename}'.")
-                    break
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        wait_time = initial_wait_time * (2 ** attempt)
-                        print(f"    - FAILED to download '{filename}'. Error: {e}. Retrying in {wait_time} seconds...")
-                        time.sleep(wait_time)
-                    else:
-                        print(f"    - FATAL: Failed to download '{filename}' after {max_retries} attempts.")
-                        raise e
-        print("--> Intelligent download complete.")
-
-    try:
-        print(f"\n--> Step 3/4: Loading dataset '{repo_id}' from local cache...")
-        dataset = load_dataset(repo_id, split=split, download_mode="reuse_dataset_if_exists")
-        print(f"\n[Data Engine] Successfully loaded the '{split}' split.")
-        print("--> Step 4/4: Data Engine finished.")
-        return dataset
-    except Exception as e:
-        print(
-            f"--> FATAL: Failed to load dataset from cache even after download. Cache might be severely corrupted. Error: {e}")
-        sys.exit(1)
-
-
-def run_grpo(config_path: str) -> None:
-    """
-    Main function to execute the GRPO process.
-    """
-    print("--- [Bedrock] Initiating Group Relative Policy Optimization (GRPO) ---")
-    print(f"--> NOTE: Hugging Face endpoint is set to: {os.environ.get('HF_ENDPOINT')}")
-
-    print(f"\n[Configuration] Loading configuration from: {config_path}")
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-
-    dataset = load_dataset_robustly(config['dataset_name'], split="train")
-
-    if 'dataset_subset_size' in config and int(config['dataset_subset_size']) > 0:
-        subset_size = int(config['dataset_subset_size'])
-        dataset = dataset.select(range(subset_size))
-        print(f"--> Using a subset of {subset_size} samples for this run.")
-
-    def format_grpo_dataset(example: dict) -> dict:
-        return {"query": example[config['dataset_text_field']]}
-
-    dataset = dataset.map(format_grpo_dataset, remove_columns=dataset.column_names)
-
-    tokenizer = AutoTokenizer.from_pretrained(config['model_name_or_path'], trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "left"
-
-    def tokenize(example):
-        return tokenizer(example["query"], truncation=True, max_length=128, padding="max_length")
-
-    dataset = dataset.map(tokenize, batched=False)
-    dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "query"])
-
-
-    print(f"Dataset loaded and formatted with {len(dataset)} prompts.")
-
-    print(f"\n[Model Loading] Loading SFT model as Actor for GRPO: {config['model_name_or_path']}")
-
-    peft_config_for_base = PeftConfig.from_pretrained(config['model_name_or_path'])
-    base_model_name = peft_config_for_base.base_model_name_or_path
-
-    print("--> Using 'force load into RAM' strategy for robust CPU execution.")
-
-    print("--> Step 1/2: Loading SFT-tuned model and merging into a clean base model...")
-    base_model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32)
-    sft_merged_model = PeftModel.from_pretrained(base_model, config['model_name_or_path']).merge_and_unload()
-    print("--> SFT weights merged successfully.")
-
-    peft_config = LoraConfig(
-        r=int(config['lora_r']),
-        lora_alpha=int(config['lora_alpha']),
-        lora_dropout=float(config['lora_dropout']),
-        target_modules=config['lora_target_modules'],
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
-
-    print("--> Step 2/2: Wrapping SFT model with ValueHead AND applying new PEFT adapter for GRPO...")
-    model = AutoModelForCausalLMWithValueHead.from_pretrained(
-        sft_merged_model,
-        peft_config=peft_config,
-    )
-    print("--> Model correctly wrapped with ValueHead and PEFT adapter. Ready for GRPOTrainer.")
-    gc.collect()
-
-
-    print("\n[Configuration] Setting up GRPO training arguments...")
-    grpo_config = GRPOConfig(
-        output_dir=config['output_dir'],
-        num_train_epochs=1,
-        max_steps=int(config['grpo_steps']),
-        per_device_train_batch_size=int(config['batch_size']),
-        gradient_accumulation_steps=int(config['gradient_accumulation_steps']),
-        learning_rate=float(config['learning_rate']),
-        log_with=config.get('report_to'),
-        logging_steps=1,
-        run_name=config['run_name'],
-        remove_unused_columns=False,
-        seed=int(config['seed']),
-        beta=float(config['beta']),
-        num_generations=int(config['num_generations']),
-    )
-
-    print("[Reward Model] Initializing conceptual Reward Model (rewards based on length)...")
-
-    def get_dummy_reward(outputs_text):
-        rewards = []
-        for text in outputs_text:
-            unique_words = len(set(text.split()))
-            rewards.append(torch.tensor(float(unique_words)))
-        return rewards
-
-    print("\n[Trainer Init] Initializing GRPOTrainer...")
-    grpo_trainer = GRPOTrainer(
-        model=model,
-        ref_model=None, # TRL will handle the reference model
-        args=grpo_config,
-        tokenizer=tokenizer,
-        train_dataset=dataset,
-    )
-
-    print("\n--- GRPO Training Started ---")
-    generation_config = GenerationConfig(
-        min_length=-1,
-        top_k=0.0,
-        top_p=1.0,
-        do_sample=True,
-        pad_token_id=tokenizer.eos_token_id,
-        eos_token_id=tokenizer.eos_token_id,
-        max_new_tokens=int(config['max_new_tokens']),
-    )
-
-    for i, batch in enumerate(grpo_trainer.dataloader):
-        if i >= config['grpo_steps']:
-            break
-
-        print(f"--- GRPO Step {i + 1}/{config['grpo_steps']} ---")
-
-        queries_text = batch["query"]
-        query_tensors = batch["input_ids"]
-
-        # [FIX] GRPOTrainer.generate expects the tokenized tensors, not raw text.
-        responses_text = grpo_trainer.generate(query_tensors, generation_config=generation_config)
-
-        rewards = get_dummy_reward(responses_text)
-
-        # The 'step' method expects lists of strings, so we decode the responses here.
-        decoded_responses_text = tokenizer.batch_decode(responses_text, skip_special_tokens=True)
-
-        train_stats = grpo_trainer.step([q for q in queries_text], decoded_responses_text, rewards)
-
-        log_output = f"GRPO Step {i + 1}/{config['grpo_steps']}:"
-        for key, value in train_stats.items():
-            if isinstance(value, (float, int, torch.Tensor)):
-                log_output += f" | {key.replace('grpo/', '')}: {float(value):.4f}"
-        print(log_output)
-
-    print("\n--- GRPO Training Finished ---")
-
-    final_model_path = Path(config['output_dir']) / "final_model"
-    os.makedirs(final_model_path, exist_ok=True)
-
-    print(f"\n[Saving] Saving final GRPO-tuned adapter model to {final_model_path}...")
-    grpo_trainer.save_model(str(final_model_path))
-    tokenizer.save_pretrained(str(final_model_path))
-
-    print("Model and tokenizer saved successfully.")
-
-    print("\n--- [Bedrock] GRPO Process Complete ---")
-
-
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python src/trainers/grpo_trainer.py <path_to_config.yaml>")
-        sys.exit(1)
-    config_file_path = sys.argv[1]
-    run_grpo(config_file_path)
-
-====================
-文件: .\src\trainers\orpo_trainer.py
-====================
-
-# FILE: src/trainers/orpo_trainer.py
-"""
-Bedrock Protocol: Odds Ratio Preference Optimization (ORPO) Trainer.
-
-This script implements the ORPO algorithm, a single-stage alignment technique
-that combines SFT and DPO-like preference optimization. It does not require
-a separate reference model or explicit reward model.
-"""
-
-# [HARDCODED MIRROR] Force Hugging Face Hub downloads to go through a domestic mirror
-import os
-
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-
-import sys
-from pathlib import Path
-import yaml
-import torch
-import gc
-import shutil
-import time
-from datasets import load_dataset
-from huggingface_hub import list_repo_files, hf_hub_download, HfApi
-from huggingface_hub.constants import HF_HUB_CACHE
-from huggingface_hub.hf_api import RepoFile
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-)
-from peft import LoraConfig, get_peft_model
-from trl import ORPOTrainer, ORPOConfig
-
-# Ensure project root is in path for imports
-script_path = Path(__file__).resolve()
-project_root = script_path.parent.parent.parent
-if str(project_root) not in sys.path:
-    sys.path.append(str(project_root))
-
-from src.utils.data_formatters import format_dpo_dataset_factory
-
-
-def load_dataset_robustly(repo_id: str, split: str):
-    """
-    [ULTIMATE DATA ENGINE V12.0] Intelligently validates and downloads datasets.
-    """
-    print(f"\n[Data Engine] Initializing for dataset '{repo_id}'.")
-
-    print("--> Step 1/4: Performing pre-flight check of local cache...")
-
-    local_cache_dir = Path(HF_HUB_CACHE) / f"datasets--{repo_id.replace('/', '--')}"
-    is_complete = False
-
-    try:
-        api = HfApi()
-        repo_files_info = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
-
-        def get_filename(file_info):
-            return file_info.rfilename if isinstance(file_info, RepoFile) else file_info
-
-        relevant_files = {
-            get_filename(f) for f in repo_files_info
-            if get_filename(f).endswith(('.json', '.jsonl', '.parquet', '.arrow', '.csv', '.txt',
-                                         '.py')) or "dataset_info.json" in get_filename(
-                f) or "README.md" in get_filename(f)
-        }
-
-        if not local_cache_dir.exists():
-            print("--> STATUS: Local cache directory does not exist. Full download required.")
-            files_to_download = list(relevant_files)
-        else:
-            snapshot_dir = local_cache_dir / 'snapshots'
-            if not snapshot_dir.exists():
-                print("--> STATUS: Local cache directory exists but is empty. Full download required.")
-                files_to_download = list(relevant_files)
-            else:
-                local_files_in_snapshot = {p.name for p in snapshot_dir.rglob('*') if p.is_file()}
-                is_missing = any(
-                    Path(f).name not in local_files_in_snapshot for f in relevant_files if not Path(f).is_dir())
-
-                if not is_missing:
-                    print("--> STATUS: Cache check passed. All files appear to be present. Skipping download.")
-                    is_complete = True
-                    files_to_download = []
-                else:
-                    print(f"--> STATUS: Cache incomplete. Full re-download will be triggered for safety.")
-                    files_to_download = list(relevant_files)
-
-    except Exception as e:
-        print(f"--> WARNING: Pre-flight check failed. Assuming full download is needed. Error: {e}")
-        api = HfApi()
-        repo_files_info = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
-
-        def get_filename(file_info):
-            return file_info.rfilename if isinstance(file_info, RepoFile) else file_info
-
-        files_to_download = [get_filename(info) for info in repo_files_info if get_filename(info).endswith(
-            ('.json', '.jsonl', '.parquet', '.arrow', '.csv', '.txt', '.py')) or "dataset_info.json" in get_filename(
-            info) or "README.md" in get_filename(info)]
-
-    if not is_complete:
-        print(f"\n--> Step 2/4: Starting intelligent download of {len(files_to_download)} file(s)...")
-        max_retries = 5
-        initial_wait_time = 2
-
-        for i, filename in enumerate(files_to_download):
-            for attempt in range(max_retries):
-                try:
-                    print(
-                        f"    - Downloading file {i + 1}/{len(files_to_download)}: '{filename}' (Attempt {attempt + 1}/{max_retries})...")
-                    hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset", resume_download=True)
-                    print(f"    - Successfully downloaded '{filename}'.")
-                    break
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        wait_time = initial_wait_time * (2 ** attempt)
-                        print(f"    - FAILED to download '{filename}'. Error: {e}. Retrying in {wait_time} seconds...")
-                        time.sleep(wait_time)
-                    else:
-                        print(f"    - FATAL: Failed to download '{filename}' after {max_retries} attempts.")
-                        raise e
-        print("--> Intelligent download complete.")
-
-    try:
-        print(f"\n--> Step 3/4: Loading dataset '{repo_id}' from local cache...")
-        dataset = load_dataset(repo_id, split=split, download_mode="reuse_dataset_if_exists")
-        print(f"\n[Data Engine] Successfully loaded the '{split}' split.")
-        print("--> Step 4/4: Data Engine finished.")
-        return dataset
-    except Exception as e:
-        print(
-            f"--> FATAL: Failed to load dataset from cache even after download. Cache might be severely corrupted. Error: {e}")
-        sys.exit(1)
-
-
-def run_orpo(config_path: str) -> None:
-    """
-    Main function to execute the ORPO training process.
-    """
-    print("--- [Bedrock] Initiating Odds Ratio Preference Optimization (ORPO) ---")
-    print(f"--> NOTE: Hugging Face endpoint is set to: {os.environ.get('HF_ENDPOINT')}")
-
-    # 1. Load Configuration
-    print(f"\n[Configuration] Loading configuration from: {config_path}")
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-
-    # 2. Load Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(config['model_name_or_path'], trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "right"
-
-    print("Tokenizer loaded successfully.")
-
-    # 3. Load and Format Dataset
-    dataset = load_dataset_robustly(config['dataset_name'], split="train")
-
-    if 'dataset_subset_size' in config and int(config['dataset_subset_size']) > 0:
-        subset_size = int(config['dataset_subset_size'])
-        dataset = dataset.select(range(subset_size))
-        print(f"--> Using a subset of {subset_size} samples for this run.")
-
-    formatting_function = format_dpo_dataset_factory(tokenizer)
-    dataset = dataset.map(formatting_function)
-
-    print(f"Dataset loaded and formatted with {len(dataset)} samples for ORPO training.")
-
-    # 4. Load Base Model for ORPO Training
-    print(f"\n[Model Loading] Loading base model for ORPO: {config['model_name_or_path']}")
-    print("--> Using 'force load into RAM' strategy for robust CPU execution.")
-
-    model = AutoModelForCausalLM.from_pretrained(
-        config['model_name_or_path'],
-        torch_dtype=torch.float32,
-    )
-    model.config.use_cache = False
-
-    print("Base model loaded successfully.")
-    gc.collect()
-
-    # 5. Configure PEFT (LoRA) for ORPO training
-    print("\n[Configuration] Configuring PEFT with LoRA for ORPO training...")
-    peft_config = LoraConfig(
-        r=int(config['lora_r']),
-        lora_alpha=int(config['lora_alpha']),
-        lora_dropout=float(config['lora_dropout']),
-        target_modules=config['lora_target_modules'],
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
-    model = get_peft_model(model, peft_config)
-    print("PEFT adapter applied for ORPO training. Trainable parameters:")
-    model.print_trainable_parameters()
-
-    # 6. Configure Training Arguments using ORPOConfig
-    print("[Configuration] Setting up training arguments for ORPO...")
-    log_with = config.get('report_to')
-    if log_with == "none" or log_with is None:
-        log_with = None
-
-    training_args = ORPOConfig(
-        output_dir=config['output_dir'],
-        num_train_epochs=int(config['num_train_epochs']),
-        per_device_train_batch_size=int(config['per_device_train_batch_size']),
-        per_device_eval_batch_size=int(config['per_device_eval_batch_size']),
-        gradient_accumulation_steps=int(config['gradient_accumulation_steps']),
-        optim=config['optim'],
-        learning_rate=float(config['learning_rate']),
-        weight_decay=float(config.get('weight_decay', 0.0)),
-        max_grad_norm=float(config['max_grad_norm']),
-        logging_steps=int(config['logging_steps']),
-        max_steps=int(config['max_steps']),
-        lr_scheduler_type=config['lr_scheduler_type'],
-        report_to=log_with,
-        run_name=config['run_name'],
-        remove_unused_columns=False,
-        # ORPO-specific arguments
-        beta=float(config['beta']),
-        max_length=int(config['max_length']),
-        max_prompt_length=int(config['max_prompt_length']),
-    )
-
-    # 7. Initialize ORPOTrainer
-    print("\n[Trainer Init] Initializing ORPOTrainer...")
-    orpo_trainer = ORPOTrainer(
-        model=model,
-        tokenizer=tokenizer,
-        args=training_args,
-        train_dataset=dataset,
-    )
-
-    print("\n--- ORPO Training Started ---")
-    orpo_trainer.train()
-    print("\n--- ORPO Training Finished ---")
-
-    # 8. Save Final Model
-    final_model_path = Path(config['output_dir']) / "final_model"
-    os.makedirs(final_model_path, exist_ok=True)
-
-    print(f"\n[Saving] Saving final ORPO-tuned adapter model to {final_model_path}...")
-    orpo_trainer.model.save_pretrained(str(final_model_path))
-    tokenizer.save_pretrained(str(final_model_path))
-    print("Model and tokenizer saved successfully.")
-
-    print("\n--- [Bedrock] ORPO Process Complete ---")
-    gc.collect()
-
-
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python src/trainers/orpo_trainer.py <path_to_config.yaml>")
-        sys.exit(1)
-    config_file_path = sys.argv[1]
-    run_orpo(config_file_path)
-
-# END OF FILE: src/trainers/orpo_trainer.py
 
 ====================
 文件: .\src\trainers\ppo_trainer.py
@@ -4883,7 +4003,7 @@ def run_ppo(config_path: str) -> None:
     dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "query"])
     print(f"Dataset loaded and formatted with {len(dataset)} prompts.")
 
-    print(f"\n[Model Loading] Loading SFT model as Actor for PPO: {config['model_name_or_path']}")
+    print(f"\n[Model Loading] Loading and preparing PPO Actor model from: {config['model_name_or_path']}")
 
     peft_config_for_base = PeftConfig.from_pretrained(config['model_name_or_path'])
     base_model_name = peft_config_for_base.base_model_name_or_path
@@ -4893,6 +4013,7 @@ def run_ppo(config_path: str) -> None:
     sft_merged_model = PeftModel.from_pretrained(base_model, config['model_name_or_path']).merge_and_unload()
     print("--> SFT weights merged successfully.")
 
+    print("--> Step 2/2: Wrapping SFT model with ValueHead AND applying PEFT adapter in a single operation...")
     ppo_peft_config = LoraConfig(
         r=int(config['lora_r']),
         lora_alpha=int(config['lora_alpha']),
@@ -4902,29 +4023,32 @@ def run_ppo(config_path: str) -> None:
         task_type="CAUSAL_LM",
     )
 
-    print("--> Step 2/2: Wrapping SFT model with ValueHead AND applying new PEFT adapter in one step...")
     model = AutoModelForCausalLMWithValueHead.from_pretrained(
         sft_merged_model,
         peft_config=ppo_peft_config,
     )
-    print("--> Model correctly wrapped with ValueHead and PEFT adapter. Ready for PPOTrainer.")
+    print("--> PPO Actor model with ValueHead and LoRA adapter is ready.")
+
+    # [FINAL FIX] The `print_trainable_parameters` method is part of the PEFT model,
+    # but not the top-level wrapper. We can safely remove this line.
+    # The trainer itself will log parameter counts upon initialization.
+    # model.print_trainable_parameters()
+
     gc.collect()
 
     print("\n[Configuration] Setting up PPO training arguments...")
 
-    report_to = config.get('report_to', 'none')
-    if report_to == 'none':
-        report_to = None
+    log_with = config.get('report_to', 'none')
+    if log_with == 'none':
+        log_with = None
 
     ppo_config = PPOConfig(
         exp_name=config['run_name'],
-        report_to=report_to,
+        log_with=log_with,
         learning_rate=float(config['learning_rate']),
         batch_size=int(config['batch_size']),
         mini_batch_size=int(config['mini_batch_size']),
         gradient_accumulation_steps=int(config['gradient_accumulation_steps']),
-        # [FIX] Removed unexpected 'ppo_epochs' argument. It is controlled by the trainer loop.
-        init_kl_coef=float(config['init_kl_coef']),
         target_kl=float(config.get('target_kl', 0.1)),
         adap_kl_ctrl=bool(config['adap_kl_ctrl']),
         seed=int(config['seed']),
@@ -4932,6 +4056,7 @@ def run_ppo(config_path: str) -> None:
     )
 
     print("[Reward Model] Initializing conceptual Reward Model (rewards based on length)...")
+
     def get_dummy_reward(outputs_text):
         rewards = []
         for text in outputs_text:
@@ -4964,8 +4089,6 @@ def run_ppo(config_path: str) -> None:
     ]
 
     total_ppo_steps = int(config['ppo_steps'])
-    # The number of inner epochs is now controlled by the PPOConfig, not a separate parameter.
-    # TRL's PPOTrainer handles this internally during the `step` call.
     for step, batch in enumerate(ppo_trainer.dataloader):
         if step >= total_ppo_steps:
             break
@@ -5021,7 +4144,6 @@ Bedrock Protocol: Main Pre-training Trainer.
 This script orchestrates the end-to-end pre-training of a language model,
 from loading data and model configuration to running the distributed training loop.
 It integrates Hugging Face Accelerate and supports DeepSpeed for advanced parallelism.
-Now supports resuming from a checkpoint.
 """
 
 import sys
@@ -5031,13 +4153,12 @@ import yaml
 import torch
 import torch.nn.functional as F
 from datasets import load_from_disk
-from transformers import AutoTokenizer, get_scheduler, PreTrainedModel, AutoModelForCausalLM
+from transformers import AutoTokenizer, get_scheduler
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 import wandb
-import gc
 
 # Ensure project root is in path for imports
 script_path = Path(__file__).resolve()
@@ -5055,7 +4176,6 @@ def get_total_params(model: torch.nn.Module) -> int:
 def run_pretrain(config_path: str) -> None:
     """
     Main function to execute the pre-training process.
-    Supports resuming from a checkpoint.
 
     Args:
         config_path: Path to the YAML configuration file.
@@ -5063,7 +4183,7 @@ def run_pretrain(config_path: str) -> None:
     print("--- [Bedrock] Initiating From-Scratch Pre-training ---")
 
     # 1. Load Configuration
-    print(f"[Configuration] Loading configuration from: {config_path}")
+    print(f"Loading configuration from: {config_path}")
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
 
@@ -5073,7 +4193,6 @@ def run_pretrain(config_path: str) -> None:
         log_with=config.get('report_to'),
         project_dir=config['output_dir']
     )
-    print(f"Accelerator initialized with mixed_precision='{accelerator.mixed_precision}'")
 
     set_seed(int(config['seed']))
 
@@ -5086,49 +4205,25 @@ def run_pretrain(config_path: str) -> None:
         )
         print("WandB initialized.")
 
-    # 4. Load Tokenizer
-    tokenizer_path_str = config['tokenizer_path']
-    tokenizer_load_path = project_root / tokenizer_path_str
+    # 4. Load Model Architecture Configuration
+    model_config_path = project_root / config['model_config_path']
+    print(f"Loading model architecture configuration from: {model_config_path}")
+    with open(model_config_path, 'r') as f:
+        model_config_dict = yaml.safe_load(f)
+
+    model_config_dict['model_type_llm'] = model_config_dict.pop('model_type', 'DenseLLM')
+
+    # 5. Load Tokenizer
+    tokenizer_path_str = model_config_dict['tokenizer_path']
+    hf_tokenizer_path_str = f"{tokenizer_path_str}_hf"
+    tokenizer_load_path = project_root / hf_tokenizer_path_str
     if not tokenizer_load_path.exists():
-        # Fallback if tokenizer is saved within the model checkpoint directory directly
-        tokenizer_load_path = Path(config['model_name_or_path'])
-    print(f"Loading tokenizer from: {tokenizer_load_path}")
+        tokenizer_load_path = Path(tokenizer_path_str + "_hf")
+    print(f"Loading tokenizer from Hugging Face format: {tokenizer_load_path}")
     tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_load_path), trust_remote_code=True, use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     print("Tokenizer loaded successfully.")
-
-    # 5. Load Model Architecture or Resume from Checkpoint
-    model_name_or_path = config.get('model_name_or_path')
-    resume_from_checkpoint = config.get('resume_from_checkpoint')
-
-    if resume_from_checkpoint:
-        print(f"Resuming pre-training from checkpoint: {resume_from_checkpoint}")
-        # When resuming, we load the full model from the checkpoint
-        # Assuming the checkpoint contains the full model (not just PEFT adapter for pre-training)
-        # Use AutoModelForCausalLM.from_pretrained for full model loading
-        model = AutoModelForCausalLM.from_pretrained(str(resume_from_checkpoint), trust_remote_code=True)
-        # Ensure config is updated in case tokenizer vocab size was adjusted
-        model.config.pad_token_id = tokenizer.pad_token_id
-        model.config.vocab_size = tokenizer.vocab_size
-        print(f"Model loaded from checkpoint. Total parameters: {get_total_params(model) / 1e9:.2f} Billion")
-    else:
-        model_config_path = project_root / config['model_config_path']
-        print(f"Loading new model architecture configuration from: {model_config_path}")
-        with open(model_config_path, 'r') as f:
-            model_config_dict = yaml.safe_load(f)
-
-        model_config_dict['model_type_llm'] = model_config_dict.pop('model_type', 'DenseLLM')
-        model_config_dict['vocab_size'] = tokenizer.vocab_size
-        model_config_dict['pad_token_id'] = tokenizer.pad_token_id
-
-        print("Initializing new model architecture...")
-        model_config_obj = BaseLLMConfig(**model_config_dict)
-        model = BaseLLM(model_config_obj)
-        print(f"New model initialized with {get_total_params(model) / 1e9:.2f} Billion parameters.")
-
-    # Ensure model is in evaluation mode initially, then set to train
-    model.train()
 
     # 6. Load Dataset and Tokenize
     dataset_dir = project_root / config['dataset_dir']
@@ -5144,14 +4239,22 @@ def run_pretrain(config_path: str) -> None:
                                         remove_columns=raw_dataset['train'].column_names,
                                         num_proc=num_processes_for_map, desc="Tokenizing dataset")
     tokenized_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask'])
-
-    # [FIX] DataLoader creation for Accelerate, ensure no 'auto' device_map
     train_dataloader = DataLoader(tokenized_dataset["train"], shuffle=True,
                                   batch_size=int(config['per_device_train_batch_size']))
     eval_dataloader = DataLoader(tokenized_dataset["validation"], batch_size=int(config['per_device_train_batch_size']))
     print("Dataset tokenized and DataLoaders prepared.")
 
-    # 7. Setup Optimizer and Scheduler
+    # 7. Initialize Model
+    print("Initializing model architecture...")
+    model_config_dict['vocab_size'] = tokenizer.vocab_size
+    model_config_dict['pad_token_id'] = tokenizer.pad_token_id
+
+    model_config_obj = BaseLLMConfig(**model_config_dict)
+    model = BaseLLM(model_config_obj)
+
+    print(f"Model initialized with {get_total_params(model) / 1e9:.2f} Billion parameters.")
+
+    # 8. Setup Optimizer and Scheduler
     print("Setting up optimizer and learning rate scheduler...")
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -5160,8 +4263,8 @@ def run_pretrain(config_path: str) -> None:
         betas=(float(config['adam_beta1']), float(config['adam_beta2'])),
         eps=float(config['adam_epsilon'])
     )
-    num_training_steps = int(config['max_steps']) if int(config['max_steps']) > 0 else (len(train_dataloader) // int(
-        config['gradient_accumulation_steps'])) * int(config['num_train_epochs'])
+    num_training_steps = int(config['max_steps']) if int(config['max_steps']) > 0 else len(train_dataloader) // int(
+        config['gradient_accumulation_steps']) * int(config['num_train_epochs'])
     lr_scheduler = get_scheduler(
         name=config['lr_scheduler_type'],
         optimizer=optimizer,
@@ -5170,13 +4273,13 @@ def run_pretrain(config_path: str) -> None:
     )
     print(f"Total training steps: {num_training_steps}")
 
-    # 8. Prepare for Distributed Training with Accelerate
+    # 9. Prepare for Distributed Training with Accelerate
     model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
     )
     print("Model, Optimizer, DataLoaders, and Scheduler prepared for training.")
 
-    # 9. Training Loop
+    # 10. Training Loop
     print("\n--- Training Started ---")
     progress_bar = tqdm(range(num_training_steps), disable=not accelerator.is_local_main_process)
     completed_steps = 0
@@ -5193,12 +4296,10 @@ def run_pretrain(config_path: str) -> None:
                     attention_mask=batch['attention_mask'],
                     labels=batch['input_ids']
                 )
+                # **关键**: 从标准的 ModelOutput 对象中获取 loss
                 loss = outputs.loss
 
                 accelerator.backward(loss)
-                if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(model.parameters(), float(
-                        config['max_grad_norm']))  # Apply gradient clipping after accumulation
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
@@ -5219,20 +4320,20 @@ def run_pretrain(config_path: str) -> None:
                     unwrapped_model = accelerator.unwrap_model(model)
 
                     if accelerator.is_main_process:
-                        os.makedirs(output_path, exist_ok=True)  # Ensure directory exists
+                        # 现在模型自身就是一致的，可以直接用默认方式保存
                         unwrapped_model.save_pretrained(str(output_path))
                         tokenizer.save_pretrained(str(output_path))
                         print(f"Checkpoint saved at step {completed_steps} to {output_path}")
 
     progress_bar.close()
-    print("\n--- Training Finished ---")
+    print("--- Training Finished ---")
 
     if accelerator.is_main_process:
         final_model_path = Path(config['output_dir']) / "final_model"
         accelerator.wait_for_everyone()
         unwrapped_model = accelerator.unwrap_model(model)
 
-        os.makedirs(final_model_path, exist_ok=True)  # Ensure directory exists
+        # 同样，直接保存即可
         unwrapped_model.save_pretrained(str(final_model_path))
         tokenizer.save_pretrained(str(final_model_path))
         print(f"Final model and tokenizer saved to {final_model_path}")
@@ -5240,7 +4341,6 @@ def run_pretrain(config_path: str) -> None:
             wandb.finish()
 
     print("\n--- [Bedrock] Pre-training Process Complete ---")
-    gc.collect()
 
 
 if __name__ == "__main__":
@@ -5249,284 +4349,6 @@ if __name__ == "__main__":
         sys.exit(1)
     config_file_path = sys.argv[1]
     run_pretrain(config_file_path)
-
-# END OF FILE: src/trainers/pretrain_trainer.py
-
-====================
-文件: .\src\trainers\reward_model_trainer.py
-====================
-
-# FILE: src/trainers/reward_model_trainer.py
-"""
-Bedrock Protocol: Reward Model Trainer.
-
-This script trains a Reward Model (RM) from human preference data.
-A Reward Model is a critical component for Reinforcement Learning from Human Feedback (RLHF)
-algorithms like PPO, enabling the model to learn what human preferences look like.
-"""
-
-# [HARDCODED MIRROR] Force Hugging Face Hub downloads to go through a domestic mirror
-import os
-
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-
-import sys
-from pathlib import Path
-import yaml
-import torch
-import gc
-import shutil
-import time
-from datasets import load_dataset
-from huggingface_hub import list_repo_files, hf_hub_download, HfApi
-from huggingface_hub.constants import HF_HUB_CACHE
-from huggingface_hub.hf_api import RepoFile
-from transformers import (
-    AutoModelForSequenceClassification,
-    AutoTokenizer,
-    TrainingArguments,
-)
-from peft import LoraConfig, get_peft_model
-from trl import RewardTrainer, RewardConfig
-
-# Ensure project root is in path for imports
-script_path = Path(__file__).resolve()
-project_root = script_path.parent.parent.parent
-if str(project_root) not in sys.path:
-    sys.path.append(str(project_root))
-
-from src.utils.data_formatters import format_dpo_dataset_factory
-
-
-def load_dataset_robustly(repo_id: str, split: str):
-    """
-    [ULTIMATE DATA ENGINE V12.0] Intelligently validates and downloads datasets.
-    """
-    print(f"\n[Data Engine] Initializing for dataset '{repo_id}'.")
-
-    print("--> Step 1/4: Performing pre-flight check of local cache...")
-
-    local_cache_dir = Path(HF_HUB_CACHE) / f"datasets--{repo_id.replace('/', '--')}"
-    is_complete = False
-
-    try:
-        api = HfApi()
-        repo_files_info = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
-
-        def get_filename(file_info):
-            return file_info.rfilename if isinstance(file_info, RepoFile) else file_info
-
-        relevant_files = {
-            get_filename(f) for f in repo_files_info
-            if get_filename(f).endswith(('.json', '.jsonl', '.parquet', '.arrow', '.csv', '.txt',
-                                         '.py')) or "dataset_info.json" in get_filename(
-                f) or "README.md" in get_filename(f)
-        }
-
-        if not local_cache_dir.exists():
-            print("--> STATUS: Local cache directory does not exist. Full download required.")
-            files_to_download = list(relevant_files)
-        else:
-            snapshot_dir = local_cache_dir / 'snapshots'
-            if not snapshot_dir.exists():
-                print("--> STATUS: Local cache directory exists but is empty. Full download required.")
-                files_to_download = list(relevant_files)
-            else:
-                local_files_in_snapshot = {p.name for p in snapshot_dir.rglob('*') if p.is_file()}
-                is_missing = any(
-                    Path(f).name not in local_files_in_snapshot for f in relevant_files if not Path(f).is_dir())
-
-                if not is_missing:
-                    print("--> STATUS: Cache check passed. All files appear to be present. Skipping download.")
-                    is_complete = True
-                    files_to_download = []
-                else:
-                    print(f"--> STATUS: Cache incomplete. Full re-download will be triggered for safety.")
-                    files_to_download = list(relevant_files)
-
-    except Exception as e:
-        print(f"--> WARNING: Pre-flight check failed. Assuming full download is needed. Error: {e}")
-        api = HfApi()
-        repo_files_info = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
-
-        def get_filename(file_info):
-            return file_info.rfilename if isinstance(file_info, RepoFile) else file_info
-
-        files_to_download = [get_filename(info) for info in repo_files_info if get_filename(info).endswith(
-            ('.json', '.jsonl', '.parquet', '.arrow', '.csv', '.txt', '.py')) or "dataset_info.json" in get_filename(
-            info) or "README.md" in get_filename(info)]
-
-    if not is_complete:
-        print(f"\n--> Step 2/4: Starting intelligent download of {len(files_to_download)} file(s)...")
-        max_retries = 5
-        initial_wait_time = 2
-
-        for i, filename in enumerate(files_to_download):
-            for attempt in range(max_retries):
-                try:
-                    print(
-                        f"    - Downloading file {i + 1}/{len(files_to_download)}: '{filename}' (Attempt {attempt + 1}/{max_retries})...")
-                    hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset", resume_download=True)
-                    print(f"    - Successfully downloaded '{filename}'.")
-                    break
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        wait_time = initial_wait_time * (2 ** attempt)
-                        print(f"    - FAILED to download '{filename}'. Error: {e}. Retrying in {wait_time} seconds...")
-                        time.sleep(wait_time)
-                    else:
-                        print(f"    - FATAL: Failed to download '{filename}' after {max_retries} attempts.")
-                        raise e
-        print("--> Intelligent download complete.")
-
-    try:
-        print(f"\n--> Step 3/4: Loading dataset '{repo_id}' from local cache...")
-        dataset = load_dataset(repo_id, split=split, download_mode="reuse_dataset_if_exists")
-        print(f"\n[Data Engine] Successfully loaded the '{split}' split.")
-        print("--> Step 4/4: Data Engine finished.")
-        return dataset
-    except Exception as e:
-        print(
-            f"--> FATAL: Failed to load dataset from cache even after download. Cache might be severely corrupted. Error: {e}")
-        sys.exit(1)
-
-
-def run_reward_model_trainer(config_path: str) -> None:
-    """
-    Main function to execute the Reward Model training process.
-    """
-    print("--- [Bedrock] Initiating Reward Model Training ---")
-    print(f"--> NOTE: Hugging Face endpoint is set to: {os.environ.get('HF_ENDPOINT')}")
-
-    print(f"\n[Configuration] Loading configuration from: {config_path}")
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-
-    tokenizer = AutoTokenizer.from_pretrained(config['model_name_or_path'], trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "right"
-    print("Tokenizer loaded successfully.")
-
-    dataset = load_dataset_robustly(config['dataset_name'], split="train")
-
-    if 'dataset_subset_size' in config and int(config['dataset_subset_size']) > 0:
-        subset_size = int(config['dataset_subset_size'])
-        dataset = dataset.select(range(subset_size))
-        print(f"--> Using a subset of {subset_size} samples for this run.")
-
-    formatting_function = format_dpo_dataset_factory(tokenizer)
-    dataset = dataset.map(formatting_function)
-
-    def preprocess_function(examples):
-        """
-        Tokenizes the chosen and rejected responses.
-        """
-        new_examples = {
-            "input_ids_chosen": [],
-            "attention_mask_chosen": [],
-            "input_ids_rejected": [],
-            "attention_mask_rejected": [],
-        }
-        for chosen, rejected in zip(examples["chosen"], examples["rejected"]):
-            tokenized_chosen = tokenizer(chosen, truncation=True, max_length=config['max_length'])
-            tokenized_rejected = tokenizer(rejected, truncation=True, max_length=config['max_length'])
-
-            new_examples["input_ids_chosen"].append(tokenized_chosen["input_ids"])
-            new_examples["attention_mask_chosen"].append(tokenized_chosen["attention_mask"])
-            new_examples["input_ids_rejected"].append(tokenized_rejected["input_ids"])
-            new_examples["attention_mask_rejected"].append(tokenized_rejected["attention_mask"])
-
-        return new_examples
-
-    tokenized_dataset = dataset.map(
-        preprocess_function,
-        batched=True,
-        num_proc=min(os.cpu_count() or 1, 4),
-        remove_columns=dataset.column_names
-    )
-    print(f"Dataset loaded and formatted with {len(tokenized_dataset)} samples for RM training.")
-
-    print(f"\n[Model Loading] Loading base model for Reward Model: {config['model_name_or_path']}")
-    print("--> Using 'force load into RAM' strategy for robust CPU execution.")
-
-    model = AutoModelForSequenceClassification.from_pretrained(
-        config['model_name_or_path'],
-        num_labels=1,
-        torch_dtype=torch.float32,
-    )
-
-    print("Reward Model base loaded successfully.")
-    gc.collect()
-
-    print("\n[Configuration] Configuring PEFT with LoRA for Reward Model training...")
-    peft_config = LoraConfig(
-        r=int(config['lora_r']),
-        lora_alpha=int(config['lora_alpha']),
-        lora_dropout=float(config['lora_dropout']),
-        target_modules=config['lora_target_modules'],
-        bias="none",
-        task_type="SEQ_CLS",
-    )
-    model = get_peft_model(model, peft_config)
-    print("PEFT adapter applied for Reward Model training. Trainable parameters:")
-    model.print_trainable_parameters()
-
-    print("[Configuration] Setting up training arguments for Reward Model...")
-    # [API UPDATE FIX] Use RewardConfig to wrap arguments
-    training_args = RewardConfig(
-        output_dir=config['output_dir'],
-        num_train_epochs=int(config['num_train_epochs']),
-        per_device_train_batch_size=int(config['per_device_train_batch_size']),
-        per_device_eval_batch_size=int(config['per_device_eval_batch_size']),
-        gradient_accumulation_steps=int(config['gradient_accumulation_steps']),
-        optim=config['optim'],
-        learning_rate=float(config['learning_rate']),
-        weight_decay=float(config.get('weight_decay', 0.0)),
-        max_grad_norm=float(config['max_grad_norm']),
-        logging_steps=int(config['logging_steps']),
-        max_steps=int(config['max_steps']),
-        lr_scheduler_type=config['lr_scheduler_type'],
-        report_to=config['report_to'],
-        run_name=config['run_name'],
-        remove_unused_columns=False,
-        # Reward-specific arguments
-        max_length=int(config['max_length']),
-    )
-
-    print("\n[Trainer Init] Initializing RewardTrainer...")
-    reward_trainer = RewardTrainer(
-        model=model,
-        tokenizer=tokenizer,
-        args=training_args,
-        train_dataset=tokenized_dataset,
-        eval_dataset=tokenized_dataset,
-    )
-
-    print("\n--- Reward Model Training Started ---")
-    reward_trainer.train()
-    print("\n--- Reward Model Training Finished ---")
-
-    final_model_path = Path(config['output_dir']) / "final_model"
-    os.makedirs(final_model_path, exist_ok=True)
-
-    print(f"\n[Saving] Saving final Reward Model to {final_model_path}...")
-    reward_trainer.save_model(str(final_model_path))
-    tokenizer.save_pretrained(str(final_model_path))
-    print("Reward Model and tokenizer saved successfully.")
-
-    print("\n--- [Bedrock] Reward Model Training Process Complete ---")
-    gc.collect()
-
-
-if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python src/trainers/reward_model_trainer.py <path_to_config.yaml>")
-        sys.exit(1)
-    config_file_path = sys.argv[1]
-    run_reward_model_trainer(config_file_path)
-
-# END OF FILE: src/trainers/reward_model_trainer.py
 
 ====================
 文件: .\src\trainers\sft_trainer.py
@@ -5563,7 +4385,7 @@ from transformers import (
     TrainingArguments,
 )
 from peft import LoraConfig
-from trl import SFTTrainer, SFTConfig
+from trl import SFTTrainer
 
 
 def load_dataset_robustly(repo_id: str, split: str):
@@ -5721,8 +4543,7 @@ def run_sft(config_path: str) -> None:
     print("PEFT configured.")
 
     print("[Configuration] Setting up training arguments...")
-    # [API UPDATE FIX] Use SFTConfig to wrap training arguments for TRL
-    training_args = SFTConfig(
+    training_args = TrainingArguments(
         output_dir=config['output_dir'],
         num_train_epochs=int(config['num_train_epochs']),
         per_device_train_batch_size=int(config['per_device_train_batch_size']),
@@ -5740,12 +4561,8 @@ def run_sft(config_path: str) -> None:
         lr_scheduler_type=config['lr_scheduler_type'],
         report_to=config['report_to'],
         run_name=config['run_name'],
-        # SFT-specific arguments now go into SFTConfig
-        dataset_text_field=config['dataset_text_field'],
-        max_seq_length=int(config['max_seq_length']),
-        packing=True,
     )
-    print("SFTConfig and training arguments set.")
+    print("Training arguments set.")
 
     print("\n[Trainer Init] Initializing SFTTrainer...")
     trainer = SFTTrainer(
@@ -5753,7 +4570,10 @@ def run_sft(config_path: str) -> None:
         tokenizer=tokenizer,
         train_dataset=dataset,
         peft_config=peft_config,
-        args=training_args, # Pass the SFTConfig object here
+        dataset_text_field=config['dataset_text_field'],
+        max_seq_length=int(config['max_seq_length']),
+        args=training_args,
+        packing=True,
     )
 
     print("\n--- SFT Training Started ---")
@@ -5761,6 +4581,7 @@ def run_sft(config_path: str) -> None:
     print("\n--- SFT Training Finished ---")
 
     final_model_path = Path(config['output_dir']) / "final_model"
+    # [FINAL SAVE FIX] Ensure the parent directory exists before saving.
     os.makedirs(final_model_path, exist_ok=True)
 
     print(f"\n[Saving] Saving final adapter model to {final_model_path}...")
@@ -5788,58 +4609,13 @@ if __name__ == "__main__":
 # FILE: src/trainers/__init__.py
 # Bedrock: This file makes the directory a Python package.
 
-# To maintain modularity and prevent cascading import errors,
-# this file is kept minimal. Individual trainer functions should be
-# imported directly from their respective modules, e.g.,
-# `from .sft_trainer import run_sft`.
+# Mandate of Zero Ambiguity: Expose key trainer functions for direct import.
+from .pretrain_trainer import run_pretrain
+from .sft_trainer import run_sft
+from .dpo_trainer import run_dpo
+from .ppo_trainer import run_ppo # Added PPO trainer
 
-====================
-文件: .\src\utils\data_formatters.py
-====================
-
-# FILE: src/utils/data_formatters.py
-"""
-Bedrock Protocol: Centralized Data Formatting Utilities.
-This module provides reusable functions for formatting datasets for various
-training paradigms (SFT, DPO, ORPO, etc.), promoting code reuse and
-decoupling trainers.
-"""
-from transformers import AutoTokenizer
-
-def format_dpo_dataset_factory(tokenizer: AutoTokenizer):
-    """
-    Creates a formatting function for preference datasets (DPO, ORPO, RM).
-    This function is designed to work with datasets that follow the TRL
-    chat format, where 'chosen' and 'rejected' fields contain a list of
-    message dictionaries.
-
-    Args:
-        tokenizer: The tokenizer to use for applying the chat template.
-
-    Returns:
-        A function that takes a dataset example and returns a dictionary
-        with 'prompt', 'chosen', and 'rejected' as formatted strings.
-    """
-    def format_dpo_dataset(example: dict) -> dict:
-        # The prompt is the conversation history *before* the final turn.
-        prompt_messages = example['chosen'][:-1]
-        # The chosen response is the full conversation including the final preferred response.
-        chosen_messages = example['chosen']
-        # The rejected response is the full conversation including the final rejected response.
-        rejected_messages = example['rejected']
-
-        prompt_str = tokenizer.apply_chat_template(prompt_messages, tokenize=False, add_generation_prompt=True)
-        chosen_str = tokenizer.apply_chat_template(chosen_messages, tokenize=False)
-        rejected_str = tokenizer.apply_chat_template(rejected_messages, tokenize=False)
-
-        return {
-            "prompt": prompt_str,
-            "chosen": chosen_str,
-            "rejected": rejected_str,
-        }
-    return format_dpo_dataset
-
-# END OF FILE: src/utils/data_formatters.py
+# END OF FILE: src/trainers/__init__.py
 
 ====================
 文件: .\src\utils\__init__.py

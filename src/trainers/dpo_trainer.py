@@ -128,6 +128,12 @@ def load_dataset_robustly(repo_id: str, split: str):
 # Factory function for data formatting
 def format_dpo_dataset_factory(tokenizer):
     def format_dpo_dataset(example: dict) -> dict:
+        # TRL's DPO trainer expects a specific format: a dictionary with 'prompt', 'chosen', and 'rejected' keys.
+        # This function adapts the hh-rlhf-trl-style dataset to that format.
+        # The 'chosen' and 'rejected' fields contain full conversations.
+        # The 'prompt' is extracted from the 'chosen' conversation, excluding the last assistant turn.
+
+        # The last turn is the response, the rest is the prompt context.
         prompt_messages = example['chosen'][:-1]
         chosen_messages = example['chosen']
         rejected_messages = example['rejected']
@@ -166,7 +172,7 @@ def run_dpo(config_path: str) -> None:
         print(f"--> Using a subset of {subset_size} samples for this run.")
 
     formatting_function = format_dpo_dataset_factory(tokenizer)
-    dataset = dataset.map(formatting_function)
+    dataset = dataset.map(formatting_function, remove_columns=dataset.column_names)
     print(f"Dataset loaded and formatted with {len(dataset)} samples.")
 
     print(f"\n[Model Loading] Loading base SFT model for DPO: {config['model_name_or_path']}")
@@ -175,20 +181,24 @@ def run_dpo(config_path: str) -> None:
     peft_config_for_base = PeftConfig.from_pretrained(config['model_name_or_path'])
     base_model_name = peft_config_for_base.base_model_name_or_path
 
-    print(f"--> Loading base model '{base_model_name}' fully into RAM for POLICY model...")
-    base_model_policy = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32)
-    print("--> Loading PEFT adapter and merging for POLICY model...")
-    model = PeftModel.from_pretrained(base_model_policy, config['model_name_or_path'])
+    print(f"--> Loading base model '{base_model_name}' fully into RAM...")
+    base_model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32)
+    print("--> Loading SFT PEFT adapter and merging...")
+    model = PeftModel.from_pretrained(base_model, config['model_name_or_path'])
     model = model.merge_and_unload()
     model.config.use_cache = False
-    print("POLICY model prepared and fully loaded into RAM.")
+    print("SFT-merged model prepared. This will be the base for DPO LoRA training.")
 
-    print(f"--> Loading base model '{base_model_name}' fully into RAM for REFERENCE model...")
-    base_model_ref = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32)
-    print("--> Loading PEFT adapter and merging for REFERENCE model...")
-    ref_model = PeftModel.from_pretrained(base_model_ref, config['model_name_or_path'])
-    ref_model = ref_model.merge_and_unload()
-    print("REFERENCE model prepared and fully loaded into RAM.")
+    # --- [CRITICAL FIX] ---
+    # According to the TRL DPOTrainer documentation and the error message, when training
+    # a new PEFT adapter (i.e., when a `peft_config` is provided), the `ref_model`
+    # argument MUST be `None`. The trainer will automatically create the reference model
+    # from the untuned base model you provide in the `model` argument.
+    # We have already loaded the SFT-tuned model as `model`. The trainer will use this
+    # as the base for the DPO adapter and also as the reference model.
+    print("--> Setting `ref_model` to None as required for PEFT-based DPO training.")
+    ref_model = None
+    # --- [END OF CRITICAL FIX] ---
 
     gc.collect()
 
@@ -226,7 +236,7 @@ def run_dpo(config_path: str) -> None:
     print("\n[Trainer Init] Initializing DPOTrainer...")
     dpo_trainer = DPOTrainer(
         model=model,
-        ref_model=ref_model,
+        ref_model=ref_model,  # Pass `None` as required
         args=training_args,
         train_dataset=dataset,
         tokenizer=tokenizer,
@@ -234,6 +244,8 @@ def run_dpo(config_path: str) -> None:
         beta=float(config['beta']),
         max_prompt_length=int(config['max_prompt_length']),
         max_length=int(config['max_length']),
+        # [NEW] Add max_target_length for more control
+        max_target_length=int(config.get('max_target_length', config['max_length'] - config['max_prompt_length']))
     )
 
     print("\n--- DPO Training Started ---")

@@ -87,8 +87,17 @@ def run_pretrain(config_path: str) -> None:
     print("Tokenizer loaded successfully.")
 
     # 6. Load Dataset and Tokenize
-    dataset_dir = project_root / config['dataset_dir']
+    dataset_dir_str = config['dataset_dir']
+    # Handle both relative and absolute paths
+    dataset_dir = Path(dataset_dir_str)
+    if not dataset_dir.is_absolute():
+        dataset_dir = project_root / dataset_dir_str
+
     print(f"Loading dataset from: {dataset_dir}")
+    # Corrected path handling for dataset
+    if not dataset_dir.exists():
+        raise FileNotFoundError(f"Processed dataset not found at the specified directory: {dataset_dir}")
+
     raw_dataset = load_from_disk(str(dataset_dir))
 
     def tokenize_function(examples):
@@ -109,6 +118,8 @@ def run_pretrain(config_path: str) -> None:
     print("Initializing model architecture...")
     model_config_dict['vocab_size'] = tokenizer.vocab_size
     model_config_dict['pad_token_id'] = tokenizer.pad_token_id
+    # Ensure tie_word_embeddings is present in the config for clarity
+    model_config_dict.setdefault('tie_word_embeddings', True)
 
     model_config_obj = BaseLLMConfig(**model_config_dict)
     model = BaseLLM(model_config_obj)
@@ -157,7 +168,6 @@ def run_pretrain(config_path: str) -> None:
                     attention_mask=batch['attention_mask'],
                     labels=batch['input_ids']
                 )
-                # **关键**: 从标准的 ModelOutput 对象中获取 loss
                 loss = outputs.loss
 
                 accelerator.backward(loss)
@@ -181,10 +191,17 @@ def run_pretrain(config_path: str) -> None:
                     unwrapped_model = accelerator.unwrap_model(model)
 
                     if accelerator.is_main_process:
-                        # 现在模型自身就是一致的，可以直接用默认方式保存
-                        unwrapped_model.save_pretrained(str(output_path))
+                        # +++ START OF FIX +++
+                        # The error suggests using safe_serialization=False for models with tied weights
+                        # when the configuration check fails. This is a direct workaround.
+                        unwrapped_model.save_pretrained(str(output_path), safe_serialization=False)
+                        # +++ END OF FIX +++
                         tokenizer.save_pretrained(str(output_path))
                         print(f"Checkpoint saved at step {completed_steps} to {output_path}")
+
+            # Break the inner loop if max steps reached
+            if completed_steps >= num_training_steps:
+                break
 
     progress_bar.close()
     print("--- Training Finished ---")
@@ -194,8 +211,10 @@ def run_pretrain(config_path: str) -> None:
         accelerator.wait_for_everyone()
         unwrapped_model = accelerator.unwrap_model(model)
 
-        # 同样，直接保存即可
-        unwrapped_model.save_pretrained(str(final_model_path))
+        # +++ START OF FIX +++
+        # Apply the same fix for the final model saving.
+        unwrapped_model.save_pretrained(str(final_model_path), safe_serialization=False)
+        # +++ END OF FIX +++
         tokenizer.save_pretrained(str(final_model_path))
         print(f"Final model and tokenizer saved to {final_model_path}")
         if config.get('report_to') == "wandb":

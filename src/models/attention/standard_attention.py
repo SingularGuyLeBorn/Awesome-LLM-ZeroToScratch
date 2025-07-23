@@ -52,6 +52,18 @@ class StandardAttention(nn.Module):
         x = x.view(new_shape)
         return x.permute(0, 2, 1, 3)  # (batch_size, num_heads, seq_len, head_dim)
 
+    def _merge_heads(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Merges the multi-head attention output back into a single tensor.
+        Input shape: (batch_size, num_heads, seq_len, head_dim)
+        Output shape: (batch_size, seq_len, hidden_size)
+        """
+        # Permute back to (batch_size, seq_len, num_heads, head_dim)
+        x = x.permute(0, 2, 1, 3).contiguous()
+        # Reshape to (batch_size, seq_len, hidden_size)
+        new_shape = x.size()[:-2] + (self.hidden_size,)
+        return x.view(new_shape)
+
     def _repeat_kv(self, hidden_states: torch.Tensor, num_kv_groups: int) -> torch.Tensor:
         """
         Repeats K/V heads for Grouped-Query Attention (GQA).
@@ -97,26 +109,26 @@ class StandardAttention(nn.Module):
         # present_key_value for the next step of generation
         present_key_value = (key_states, value_states)
 
-        # Create attention mask.
-        # attention_mask from generate() is (batch_size, current_total_seq_len) where 0 is padding.
-        # F.scaled_dot_product_attention expects additive_bias (B, 1, S_Q, S_KV) or (B, 1, S_Q, S_KV) for causal.
-        # Since is_causal=True handles causality, we only need to convert padding mask.
-        additive_attention_mask = None
+        _attn_mask_to_pass = None
         if attention_mask is not None:
-            # (batch_size, 1, 1, current_total_seq_len)
-            additive_attention_mask = (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * torch.finfo(
-                query_states.dtype).min
-            additive_attention_mask = additive_attention_mask.to(query_states.dtype)
+            # Check if there is actual padding (any 0s in the mask)
+            if torch.min(attention_mask) == 0:
+                # If there's padding, construct the additive mask.
+                _attn_mask_to_pass = (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * torch.finfo(query_states.dtype).min
+                _attn_mask_to_pass = _attn_mask_to_pass.to(query_states.dtype)
 
-        attn_output = F.scaled_dot_product_attention(
-            query_states,  # (B, H_attn, S_q, D)
-            key_states,  # (B, H_attn, S_kv_total, D)
-            value_states,  # (B, H_attn, S_kv_total, D)
-            attn_mask=additive_attention_mask,
-            is_causal=True
-        )  # (B, H_attn, S_q, D)
 
-        attn_output = self._merge_heads(attn_output)  # (B, S_q, hidden_size)
+        attn_output_sdpa = F.scaled_dot_product_attention(
+            # +++ START OF FIX +++
+            query_states,  # <-- 直接使用 query_states
+            key_states,    # <-- 直接使用 key_states
+            value_states,  # <-- 直接使用 value_states
+            # +++ END OF FIX +++
+            attn_mask=_attn_mask_to_pass,
+            is_causal=True,
+        )
+
+        attn_output = self._merge_heads(attn_output_sdpa)
         output = self.o_proj(attn_output)
 
         return output, present_key_value
