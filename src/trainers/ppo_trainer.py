@@ -153,14 +153,14 @@ def load_dataset_robustly(repo_id: str, split: str):
                     Path(f).name not in local_files_in_snapshot for f in relevant_files if not Path(f).is_dir())
                 if not is_missing:
                     print("--> STATUS: Cache check passed. All files appear to be present. Skipping download.")
-                    is_complete = True;
+                    is_complete = True
                     files_to_download = []
                 else:
-                    print(f"--> STATUS: Cache incomplete. Full re-download will be triggered for safety.");
+                    print(f"--> STATUS: Cache incomplete. Full re-download will be triggered for safety.")
                     files_to_download = list(relevant_files)
     except Exception as e:
-        print(f"--> WARNING: Pre-flight check failed. Assuming full download is needed. Error: {e}");
-        api = HfApi();
+        print(f"--> WARNING: Pre-flight check failed. Assuming full download is needed. Error: {e}")
+        api = HfApi()
         repo_files_info = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
 
         def get_filename(file_info):
@@ -170,34 +170,35 @@ def load_dataset_robustly(repo_id: str, split: str):
             ('.json', '.jsonl', '.parquet', '.arrow', '.csv', '.txt', '.py')) or "dataset_info.json" in get_filename(
             info) or "README.md" in get_filename(info)]
     if not is_complete:
-        print(f"\n--> Step 2/4: Starting intelligent download of {len(files_to_download)} file(s)...");
-        max_retries = 5;
+        print(f"\n--> Step 2/4: Starting intelligent download of {len(files_to_download)} file(s)...")
+        max_retries = 5
         initial_wait_time = 2
         for i, filename in enumerate(files_to_download):
             for attempt in range(max_retries):
                 try:
                     print(
-                        f"    - Downloading file {i + 1}/{len(files_to_download)}: '{filename}' (Attempt {attempt + 1}/{max_retries})...");
-                    hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset", resume_download=True);
-                    print(f"    - Successfully downloaded '{filename}'.");
+                        f"    - Downloading file {i + 1}/{len(files_to_download)}: '{filename}' (Attempt {attempt + 1}/{max_retries})...")
+                    hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset", resume_download=True)
+                    print(f"    - Successfully downloaded '{filename}'.")
                     break
                 except Exception as e:
                     if attempt < max_retries - 1:
-                        wait_time = initial_wait_time * (2 ** attempt); print(
-                            f"    - FAILED to download '{filename}'. Error: {e}. Retrying in {wait_time} seconds..."); time.sleep(
-                            wait_time)
+                        wait_time = initial_wait_time * (2 ** attempt)
+                        print(f"    - FAILED to download '{filename}'. Error: {e}. Retrying in {wait_time} seconds...")
+                        time.sleep(wait_time)
                     else:
-                        print(f"    - FATAL: Failed to download '{filename}' after {max_retries} attempts."); raise e
+                        print(f"    - FATAL: Failed to download '{filename}' after {max_retries} attempts.")
+                        raise e
         print("--> Intelligent download complete.")
     try:
-        print(f"\n--> Step 3/4: Loading dataset '{repo_id}' from local cache...");
-        dataset = load_dataset(repo_id, split=split, download_mode="reuse_dataset_if_exists");
-        print(f"\n[Data Engine] Successfully loaded the '{split}' split.");
-        print("--> Step 4/4: Data Engine finished.");
+        print(f"\n--> Step 3/4: Loading dataset '{repo_id}' from local cache...")
+        dataset = load_dataset(repo_id, split=split, download_mode="reuse_dataset_if_exists")
+        print(f"\n[Data Engine] Successfully loaded the '{split}' split.")
+        print("--> Step 4/4: Data Engine finished.")
         return dataset
     except Exception as e:
         print(
-            f"--> FATAL: Failed to load dataset from cache even after download. Cache might be severely corrupted. Error: {e}");
+            f"--> FATAL: Failed to load dataset from cache even after download. Cache might be severely corrupted. Error: {e}")
         sys.exit(1)
 
 
@@ -245,7 +246,7 @@ def run_ppo(config_path: str) -> None:
     print("--> Step 1b: Quantizing Critic's base model (int8)...")
     critic.model = torch.quantization.quantize_dynamic(critic.model.to("cpu"), {torch.nn.Linear}, dtype=torch.qint8)
     print("--> Critic's base model quantized. This significantly reduces its memory footprint.")
-    del base_model_for_critic;
+    del base_model_for_critic
     gc.collect()
     print("--> Temporary base model for critic destroyed.")
     print("--> Step 2: Loading SFT model to serve as the base for both Actor and Reference...")
@@ -257,7 +258,7 @@ def run_ppo(config_path: str) -> None:
     print("--> Step 3a: Creating Reference model (from merged SFT)...")
     ref_model = sft_model_merged
     for param in ref_model.parameters(): param.requires_grad = False
-    ref_model.to(device);
+    ref_model.to(device)
     print("--> Reference model ready and frozen.")
     print("--> Step 3b: Quantizing Reference model (int8)...")
     ref_model = torch.quantization.quantize_dynamic(ref_model.to("cpu"), {torch.nn.Linear}, dtype=torch.qint8)
@@ -284,10 +285,10 @@ def run_ppo(config_path: str) -> None:
 
     for ppo_step in range(int(config['ppo_steps'])):
         print(f"\n--- PPO Step {ppo_step + 1}/{config['ppo_steps']} ---")
-        actor.eval();
+        actor.eval()
         critic.eval()
-        batch = next(iter(dataloader));
-        prompt_ids, prompt_mask = batch['input_ids'].to(device), batch['attention_mask'].to(device);
+        batch = next(iter(dataloader))
+        prompt_ids, prompt_mask = batch['input_ids'].to(device), batch['attention_mask'].to(device)
         prompt_len = prompt_ids.size(1)
 
         print(f"  (1/4) Rollout: Generating responses...")
@@ -296,19 +297,19 @@ def run_ppo(config_path: str) -> None:
                                       max_new_tokens=int(config.get('max_new_tokens', 32)))
         full_ids, full_mask, response_only_ids = response_ids, (
                     response_ids != tokenizer.pad_token_id).long(), response_ids[:, prompt_len:]
-        response_mask = torch.zeros_like(full_mask);
+        response_mask = torch.zeros_like(full_mask)
         response_mask[:, prompt_len:] = full_mask[:, prompt_len:]
 
         print(f"  (2/4) Evaluation: Calculating log_probs, values, and rewards...")
         with torch.no_grad():
-            log_probs_policy = compute_log_probs(actor.model.to(device), full_ids, full_mask, response_mask);
-            log_probs_ref = compute_log_probs(ref_model, full_ids, full_mask, response_mask);
+            log_probs_policy = compute_log_probs(actor.model.to(device), full_ids, full_mask, response_mask)
+            log_probs_ref = compute_log_probs(ref_model, full_ids, full_mask, response_mask)
             values = critic(input_ids=full_ids, attention_mask=full_mask)
-            kl_div = log_probs_policy - log_probs_ref;
+            kl_div = log_probs_policy - log_probs_ref
             rewards = -kl_coef * kl_div
             decoded_responses = tokenizer.batch_decode(response_only_ids, skip_special_tokens=True)
             for i, resp in enumerate(decoded_responses):
-                terminal_reward = len(set(resp.split())) / 10.0;
+                terminal_reward = len(set(resp.split())) / 10.0
                 response_len = torch.sum(full_mask[i, prompt_len:]).int().item() - 1
                 if response_len >= 0 and (prompt_len + response_len) < rewards.size(1): rewards[
                     i, prompt_len + response_len] += terminal_reward
@@ -319,7 +320,7 @@ def run_ppo(config_path: str) -> None:
                     advantages - advantages.mean())
 
         print(f"  (4/4) Optimization: Updating policy and value models...")
-        actor.train();
+        actor.train()
         critic.train()
         for epoch in range(ppo_epochs):
             perm = torch.randperm(full_ids.size(0))
@@ -329,22 +330,22 @@ def run_ppo(config_path: str) -> None:
                 full_mask[indices], log_probs_policy[indices], returns[indices], advantages[indices], response_mask[
                     indices]
                 optimizer.zero_grad()
-                outputs = actor(input_ids=mb_ids, attention_mask=mb_mask);
-                logits = outputs.logits[:, :-1, :];
+                outputs = actor(input_ids=mb_ids, attention_mask=mb_mask)
+                logits = outputs.logits[:, :-1, :]
                 log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-                labels = mb_ids[:, 1:];
+                labels = mb_ids[:, 1:]
                 new_log_probs = torch.gather(log_probs, 2, labels.unsqueeze(2)).squeeze(2)
                 new_values = critic(input_ids=mb_ids, attention_mask=mb_mask)[:, :-1]
-                log_ratio = new_log_probs - mb_log_probs_old;
+                log_ratio = new_log_probs - mb_log_probs_old
                 ratio = torch.exp(log_ratio)
-                policy_loss_1 = -mb_advantages * ratio;
+                policy_loss_1 = -mb_advantages * ratio
                 policy_loss_2 = -mb_advantages * torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon)
                 policy_loss = (torch.max(policy_loss_1, policy_loss_2) * mb_response_mask[:,
                                                                          1:]).sum() / mb_response_mask[:, 1:].sum()
-                value_loss = 0.5 * ((new_values - mb_returns) ** 2);
+                value_loss = 0.5 * ((new_values - mb_returns) ** 2)
                 value_loss = (value_loss * mb_response_mask[:, 1:]).sum() / mb_response_mask[:, 1:].sum()
                 total_loss = policy_loss + vf_coef * value_loss
-                total_loss.backward();
+                total_loss.backward()
                 optimizer.step()
             print_ppo_stats(epoch + 1, ppo_epochs, total_loss.item(), policy_loss.item(), value_loss.item())
 
