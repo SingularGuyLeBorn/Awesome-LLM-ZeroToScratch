@@ -5,6 +5,7 @@
 from .pretrain_trainer import run_pretrain
 from .sft_trainer import run_sft
 from .dpo_trainer import run_dpo
-from .ppo_trainer import run_ppo # Added PPO trainer
+from .ppo_trainer import run_ppo
+from .grpo_trainer import run_grpo
 
 # END OF FILE: src/trainers/__init__.py

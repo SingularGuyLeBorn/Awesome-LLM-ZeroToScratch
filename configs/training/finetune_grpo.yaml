@@ -1,0 +1,60 @@
+# =====================================================================================
+# GRPO (Generalized Reinforcement Learning with Proximal Optimization) Fine-Tuning
+# Configuration file for grpo_trainer.py
+# =====================================================================================
+
+# --- Model & Tokenizer Configuration ---
+model_name_or_path: "TinyLlama/TinyLlama-1.1B-Chat-v1.0" # The base model to train
+ref_model_name_or_path: "TinyLlama/TinyLlama-1.1B-Chat-v1.0" # The reference model for KL divergence. Can be the same as the base model initially.
+tokenizer_path: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+use_fast_tokenizer: true
+
+# --- Dataset Configuration ---
+# A dummy dataset will be created by the trainer for demonstration purposes.
+# In a real scenario, you would specify a dataset from Hugging Face Hub.
+# dataset_name: "some-prompt-dataset"
+# dataset_prompt_field: "prompt"
+num_prompts_for_demo: 32 # Total number of prompts in our dummy dataset
+
+# --- Hardware & Batching Configuration ---
+# These parameters are based on the example in the prompt.
+gpus: 2 # Corresponds to the number of processes for Accelerate. Set to 1 if not using multi-GPU.
+per_device_train_batch_size: 4 # Micro-batch size per GPU for prompts.
+num_generations: 4 # Number of completions to generate for each prompt.
+gradient_accumulation_steps: 4 # Number of steps to accumulate gradients before updating weights.
+
+# --- GRPO Algorithm Hyperparameters ---
+learning_rate: 1e-5
+max_steps: 20 # Maximum number of training steps. Set to -1 for no limit.
+num_iterations: 2 # Number of optimization iterations on the same batch of data (like PPO epochs).
+beta: 0.1 # Coefficient for the KL divergence penalty. Set to 0.0 to disable.
+temperature: 1.0 # Temperature for sampling and log-prob calculation.
+epsilon_low: 0.2 # Lower bound for PPO-style clipping.
+epsilon_high: 0.2 # Upper bound for PPO-style clipping.
+scale_rewards: true # Whether to standardize advantages by the std of rewards per prompt.
+
+# --- Reward Configuration ---
+# Defines the reward functions and their weights.
+# The trainer will use dummy functions for these for demonstration.
+reward_funcs:
+  - "accuracy"
+  - "format"
+  - "tag_count"
+reward_weights:
+  - 1.0
+  - 1.0
+  - 1.0
+
+# --- Generation Parameters ---
+# Used when the model generates completions from prompts.
+max_new_tokens: 64 # Max length of the generated completion.
+min_new_tokens: 16 # Min length of the generated completion.
+generation_top_k: 0
+generation_top_p: 1.0
+generation_do_sample: true
+
+# --- General Training & Output ---
+output_dir: "./checkpoints/grpo-tinyllama-fine-tuned"
+run_name: "grpo-tinyllama-demo"
+seed: 42
+log_interval: 1 # Log statistics every N steps.
