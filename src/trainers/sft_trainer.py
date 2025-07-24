@@ -29,7 +29,7 @@ from transformers import (
     TrainingArguments,
 )
 from peft import LoraConfig
-from trl import SFTTrainer
+from trl import SFTTrainer, SFTConfig
 
 
 def load_dataset_robustly(repo_id: str, split: str):
@@ -172,6 +172,9 @@ def run_sft(config_path: str) -> None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
+    # 新版 trl 需要将 tokenizer 挂载到 model 对象上，以便 SFTTrainer 内部能自动找到它
+    model.tokenizer = tokenizer
+
     print("Model and tokenizer loaded successfully.")
     gc.collect()
 
@@ -187,7 +190,8 @@ def run_sft(config_path: str) -> None:
     print("PEFT configured.")
 
     print("[Configuration] Setting up training arguments...")
-    training_args = TrainingArguments(
+    # 使用 SFTConfig，它是 TrainingArguments 的子类，专门为 SFT 设计
+    training_args = SFTConfig(
         output_dir=config['output_dir'],
         num_train_epochs=int(config['num_train_epochs']),
         per_device_train_batch_size=int(config['per_device_train_batch_size']),
@@ -205,19 +209,21 @@ def run_sft(config_path: str) -> None:
         lr_scheduler_type=config['lr_scheduler_type'],
         report_to=config['report_to'],
         run_name=config['run_name'],
+        # 关键修复：将 max_seq_length 移动到 SFTConfig 中
+        max_seq_length=int(config['max_seq_length']),
+        # 关键修复：dataset_text_field 现在是 SFTConfig 的一部分
+        dataset_text_field=config['dataset_text_field'],
+        # packing 参数也是 SFTConfig 的一部分
+        packing=True,
     )
     print("Training arguments set.")
 
     print("\n[Trainer Init] Initializing SFTTrainer...")
     trainer = SFTTrainer(
         model=model,
-        tokenizer=tokenizer,
         train_dataset=dataset,
         peft_config=peft_config,
-        dataset_text_field=config['dataset_text_field'],
-        max_seq_length=int(config['max_seq_length']),
         args=training_args,
-        packing=True,
     )
 
     print("\n--- SFT Training Started ---")
@@ -225,11 +231,12 @@ def run_sft(config_path: str) -> None:
     print("\n--- SFT Training Finished ---")
 
     final_model_path = Path(config['output_dir']) / "final_model"
-    # [FINAL SAVE FIX] Ensure the parent directory exists before saving.
+    # Ensure the parent directory exists before saving.
     os.makedirs(final_model_path, exist_ok=True)
 
     print(f"\n[Saving] Saving final adapter model to {final_model_path}...")
     trainer.save_model(str(final_model_path))
+    # tokenizer 已经挂载在 model 上，但为了保险起见，我们还是手动保存一下
     tokenizer.save_pretrained(str(final_model_path))
     print("Model and tokenizer saved successfully.")
 

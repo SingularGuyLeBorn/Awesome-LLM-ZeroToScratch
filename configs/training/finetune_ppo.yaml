@@ -1,38 +1,49 @@
-# FILE: configs/training/finetune_ppo.yaml
 # Bedrock Protocol: Configuration for Proximal Policy Optimization (PPO).
-# MODIFIED FOR CLEAN LOGS & CPU EXECUTION
+# MODIFIED FOR CLEAN LOGS & CPU EXECUTION (EXTREME MEMORY SAVING)
 
 # --- Model & Tokenizer ---
 model_name_or_path: "./checkpoints/sft-tinyllama-guanaco-cpu/final_model" # Points to the CPU-trained adapter
 use_fast_tokenizer: true
 
+# --- Quantization Control ---
+# [NEW] Set to true to enable int8 dynamic quantization on non-trainable models (ref, critic base).
+# Set to false to run all models in float32. Quantization dramatically reduces memory on CPU.
+quantize_models: true
+
 # --- Dataset ---
 dataset_name: "imdb"
 dataset_text_field: "text"
-# [MODIFIED] Reduced subset size to accommodate larger batch size in RAM
-dataset_subset_size: 20
+# [MODIFIED] Drastically reduced subset size for minimal initial memory load.
+dataset_subset_size: 4
 
-# --- PPO Specific Parameters (TRL PPOConfig) ---
+# --- PPO Specific Parameters (TRL PPOConfig style) ---
 # [MODIFIED] Increased steps slightly for more meaningful run
 ppo_steps: 4
 learning_rate: 1.41e-5
-# [MODIFIED] Increased batch_size to >= 2 to eliminate the 'std' UserWarning
-batch_size: 2
+# [MODIFIED] Reduced batch_size to 1. This is the most critical parameter for reducing
+# runtime memory. A UserWarning about 'std' may appear but can be safely ignored.
+batch_size: 1
 mini_batch_size: 1
 gradient_accumulation_steps: 1
 ppo_epochs: 4
 init_kl_coef: 0.2
 target_kl: 0.1
 adap_kl_ctrl: true
+gamma: 0.99
+lam: 0.95
+cliprange: 0.2
+vf_coef: 0.1
 
 # --- Generation Parameters for PPO Rollouts ---
-max_new_tokens: 32
+# [MODIFIED] Drastically reduced max_new_tokens to lower memory usage during rollouts.
+max_new_tokens: 16
 min_output_length: 8
-max_output_length: 64
+max_output_length: 48 # Also reduced this slightly
 
 # --- General Training & Experiment Tracking ---
-output_dir: "./checkpoints/ppo-tinyllama-guanaco-cpu"
+output_dir: "./checkpoints/ppo-tinyllama-guanaco-cpu-quantized"
 seed: 42
+# [MODIFIED] Explicitly disabled for CPU-only execution.
 bf16: false
 fp16: false
 
@@ -47,6 +58,4 @@ lora_target_modules:
   - "o_proj"
 
 # --- Experiment Tracking ---
-run_name: "ppo-tinyllama-guanaco-demo-cpu"
-
-# END OF FILE: configs/training/finetune_ppo.yaml
+run_name: "ppo-tinyllama-guanaco-demo-cpu-quantized"

@@ -26,10 +26,50 @@ from huggingface_hub.hf_api import RepoFile
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    TrainerCallback,
+    TrainerControl,
+    TrainerState,
     TrainingArguments,
 )
 from peft import LoraConfig, PeftModel, PeftConfig
-from trl import DPOTrainer
+from trl import DPOTrainer, DPOConfig
+
+
+class RichDpoLogCallback(TrainerCallback):
+    """
+    A callback that prints DPO training logs in a clean, readable table format.
+    """
+
+    def on_log(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, logs: dict, **kwargs):
+        if state.is_world_process_zero and logs:
+            # Filter out non-metric keys
+            metrics = {k: v for k, v in logs.items() if isinstance(v, (int, float))}
+            if not metrics:
+                return
+
+            # Header for the log table
+            header = f"--- Step {state.global_step}/{state.max_steps} ---"
+            separator = "=" * len(header)
+            print(f"\n{header}")
+
+            # Prepare rows for pretty printing
+            log_items = [
+                ("Loss", metrics.get("loss")),
+                ("Learning Rate", metrics.get("learning_rate")),
+                ("Rewards Chosen", metrics.get("rewards/chosen")),
+                ("Rewards Rejected", metrics.get("rewards/rejected")),
+                ("Accuracy", metrics.get("rewards/accuracies")),
+                ("Margin", metrics.get("rewards/margins")),
+            ]
+
+            # Find the longest key for alignment
+            max_key_len = max(len(key) for key, _ in log_items)
+
+            for key, value in log_items:
+                if value is not None:
+                    print(f"{key:<{max_key_len}} : {value:.6f}")
+
+            print(separator)
 
 
 def load_dataset_robustly(repo_id: str, split: str):
@@ -128,12 +168,6 @@ def load_dataset_robustly(repo_id: str, split: str):
 # Factory function for data formatting
 def format_dpo_dataset_factory(tokenizer):
     def format_dpo_dataset(example: dict) -> dict:
-        # TRL's DPO trainer expects a specific format: a dictionary with 'prompt', 'chosen', and 'rejected' keys.
-        # This function adapts the hh-rlhf-trl-style dataset to that format.
-        # The 'chosen' and 'rejected' fields contain full conversations.
-        # The 'prompt' is extracted from the 'chosen' conversation, excluding the last assistant turn.
-
-        # The last turn is the response, the rest is the prompt context.
         prompt_messages = example['chosen'][:-1]
         chosen_messages = example['chosen']
         rejected_messages = example['rejected']
@@ -189,16 +223,10 @@ def run_dpo(config_path: str) -> None:
     model.config.use_cache = False
     print("SFT-merged model prepared. This will be the base for DPO LoRA training.")
 
-    # --- [CRITICAL FIX] ---
-    # According to the TRL DPOTrainer documentation and the error message, when training
-    # a new PEFT adapter (i.e., when a `peft_config` is provided), the `ref_model`
-    # argument MUST be `None`. The trainer will automatically create the reference model
-    # from the untuned base model you provide in the `model` argument.
-    # We have already loaded the SFT-tuned model as `model`. The trainer will use this
-    # as the base for the DPO adapter and also as the reference model.
+    model.tokenizer = tokenizer
+
     print("--> Setting `ref_model` to None as required for PEFT-based DPO training.")
     ref_model = None
-    # --- [END OF CRITICAL FIX] ---
 
     gc.collect()
 
@@ -212,8 +240,8 @@ def run_dpo(config_path: str) -> None:
         task_type="CAUSAL_LM",
     )
 
-    print("[Configuration] Setting up training arguments...")
-    training_args = TrainingArguments(
+    print("[Configuration] Setting up training arguments using DPOConfig...")
+    training_args = DPOConfig(
         output_dir=config['output_dir'],
         num_train_epochs=int(config['num_train_epochs']),
         per_device_train_batch_size=int(config['per_device_train_batch_size']),
@@ -231,21 +259,20 @@ def run_dpo(config_path: str) -> None:
         report_to=config['report_to'],
         run_name=config['run_name'],
         remove_unused_columns=False,
+        beta=float(config['beta']),
+        max_prompt_length=int(config['max_prompt_length']),
+        max_length=int(config['max_length']),
+        max_completion_length=int(config.get('max_target_length', config['max_length'] - config['max_prompt_length']))
     )
 
     print("\n[Trainer Init] Initializing DPOTrainer...")
     dpo_trainer = DPOTrainer(
         model=model,
-        ref_model=ref_model,  # Pass `None` as required
+        ref_model=ref_model,
         args=training_args,
         train_dataset=dataset,
-        tokenizer=tokenizer,
         peft_config=peft_config,
-        beta=float(config['beta']),
-        max_prompt_length=int(config['max_prompt_length']),
-        max_length=int(config['max_length']),
-        # [NEW] Add max_target_length for more control
-        max_target_length=int(config.get('max_target_length', config['max_length'] - config['max_prompt_length']))
+        callbacks=[RichDpoLogCallback],  # 关键优化：添加自定义日志回调
     )
 
     print("\n--- DPO Training Started ---")
@@ -253,7 +280,6 @@ def run_dpo(config_path: str) -> None:
     print("\n--- DPO Training Finished ---")
 
     final_model_path = Path(config['output_dir']) / "final_model"
-    # [FINAL SAVE FIX] Ensure the parent directory exists before saving.
     os.makedirs(final_model_path, exist_ok=True)
 
     print(f"\n[Saving] Saving final DPO-tuned adapter model to {final_model_path}...")

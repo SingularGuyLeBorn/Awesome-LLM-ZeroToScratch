@@ -2738,6 +2738,8 @@ class BaseLLMConfig(PretrainedConfig):
             tie_word_embeddings=True,
             is_decoder=True,
             is_encoder_decoder=False,
+            # [FIX] Add use_cache to be compatible with HF .generate()
+            use_cache=True,
             # MoE Params
             num_experts=8,
             num_experts_per_tok=2,
@@ -2764,9 +2766,17 @@ class BaseLLMConfig(PretrainedConfig):
         self.is_vlm = is_vlm
         self.num_image_tokens = num_image_tokens
         self.vision_encoder_output_dim = vision_encoder_output_dim
+        # [FIX] Set the use_cache attribute
+        self.use_cache = use_cache
 
-        super().__init__(tie_word_embeddings=tie_word_embeddings, is_decoder=is_decoder,
-                         is_encoder_decoder=is_encoder_decoder, **kwargs)
+        super().__init__(
+            tie_word_embeddings=tie_word_embeddings,
+            is_decoder=is_decoder,
+            is_encoder_decoder=is_encoder_decoder,
+            # [FIX] Pass use_cache to the parent class as well
+            use_cache=use_cache,
+            **kwargs
+        )
 
 
 class VisionEncoderDummy(nn.Module):
@@ -3479,6 +3489,18 @@ class StandardAttention(nn.Module):
         x = x.view(new_shape)
         return x.permute(0, 2, 1, 3)  # (batch_size, num_heads, seq_len, head_dim)
 
+    def _merge_heads(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Merges the multi-head attention output back into a single tensor.
+        Input shape: (batch_size, num_heads, seq_len, head_dim)
+        Output shape: (batch_size, seq_len, hidden_size)
+        """
+        # Permute back to (batch_size, seq_len, num_heads, head_dim)
+        x = x.permute(0, 2, 1, 3).contiguous()
+        # Reshape to (batch_size, seq_len, hidden_size)
+        new_shape = x.size()[:-2] + (self.hidden_size,)
+        return x.view(new_shape)
+
     def _repeat_kv(self, hidden_states: torch.Tensor, num_kv_groups: int) -> torch.Tensor:
         """
         Repeats K/V heads for Grouped-Query Attention (GQA).
@@ -3524,26 +3546,26 @@ class StandardAttention(nn.Module):
         # present_key_value for the next step of generation
         present_key_value = (key_states, value_states)
 
-        # Create attention mask.
-        # attention_mask from generate() is (batch_size, current_total_seq_len) where 0 is padding.
-        # F.scaled_dot_product_attention expects additive_bias (B, 1, S_Q, S_KV) or (B, 1, S_Q, S_KV) for causal.
-        # Since is_causal=True handles causality, we only need to convert padding mask.
-        additive_attention_mask = None
+        _attn_mask_to_pass = None
         if attention_mask is not None:
-            # (batch_size, 1, 1, current_total_seq_len)
-            additive_attention_mask = (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * torch.finfo(
-                query_states.dtype).min
-            additive_attention_mask = additive_attention_mask.to(query_states.dtype)
+            # Check if there is actual padding (any 0s in the mask)
+            if torch.min(attention_mask) == 0:
+                # If there's padding, construct the additive mask.
+                _attn_mask_to_pass = (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * torch.finfo(query_states.dtype).min
+                _attn_mask_to_pass = _attn_mask_to_pass.to(query_states.dtype)
 
-        attn_output = F.scaled_dot_product_attention(
-            query_states,  # (B, H_attn, S_q, D)
-            key_states,  # (B, H_attn, S_kv_total, D)
-            value_states,  # (B, H_attn, S_kv_total, D)
-            attn_mask=additive_attention_mask,
-            is_causal=True
-        )  # (B, H_attn, S_q, D)
 
-        attn_output = self._merge_heads(attn_output)  # (B, S_q, hidden_size)
+        attn_output_sdpa = F.scaled_dot_product_attention(
+            # +++ START OF FIX +++
+            query_states,  # <-- 直接使用 query_states
+            key_states,    # <-- 直接使用 key_states
+            value_states,  # <-- 直接使用 value_states
+            # +++ END OF FIX +++
+            attn_mask=_attn_mask_to_pass,
+            is_causal=True,
+        )
+
+        attn_output = self._merge_heads(attn_output_sdpa)
         output = self.o_proj(attn_output)
 
         return output, present_key_value
@@ -3693,6 +3715,12 @@ def load_dataset_robustly(repo_id: str, split: str):
 # Factory function for data formatting
 def format_dpo_dataset_factory(tokenizer):
     def format_dpo_dataset(example: dict) -> dict:
+        # TRL's DPO trainer expects a specific format: a dictionary with 'prompt', 'chosen', and 'rejected' keys.
+        # This function adapts the hh-rlhf-trl-style dataset to that format.
+        # The 'chosen' and 'rejected' fields contain full conversations.
+        # The 'prompt' is extracted from the 'chosen' conversation, excluding the last assistant turn.
+
+        # The last turn is the response, the rest is the prompt context.
         prompt_messages = example['chosen'][:-1]
         chosen_messages = example['chosen']
         rejected_messages = example['rejected']
@@ -3731,7 +3759,7 @@ def run_dpo(config_path: str) -> None:
         print(f"--> Using a subset of {subset_size} samples for this run.")
 
     formatting_function = format_dpo_dataset_factory(tokenizer)
-    dataset = dataset.map(formatting_function)
+    dataset = dataset.map(formatting_function, remove_columns=dataset.column_names)
     print(f"Dataset loaded and formatted with {len(dataset)} samples.")
 
     print(f"\n[Model Loading] Loading base SFT model for DPO: {config['model_name_or_path']}")
@@ -3740,20 +3768,24 @@ def run_dpo(config_path: str) -> None:
     peft_config_for_base = PeftConfig.from_pretrained(config['model_name_or_path'])
     base_model_name = peft_config_for_base.base_model_name_or_path
 
-    print(f"--> Loading base model '{base_model_name}' fully into RAM for POLICY model...")
-    base_model_policy = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32)
-    print("--> Loading PEFT adapter and merging for POLICY model...")
-    model = PeftModel.from_pretrained(base_model_policy, config['model_name_or_path'])
+    print(f"--> Loading base model '{base_model_name}' fully into RAM...")
+    base_model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32)
+    print("--> Loading SFT PEFT adapter and merging...")
+    model = PeftModel.from_pretrained(base_model, config['model_name_or_path'])
     model = model.merge_and_unload()
     model.config.use_cache = False
-    print("POLICY model prepared and fully loaded into RAM.")
+    print("SFT-merged model prepared. This will be the base for DPO LoRA training.")
 
-    print(f"--> Loading base model '{base_model_name}' fully into RAM for REFERENCE model...")
-    base_model_ref = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32)
-    print("--> Loading PEFT adapter and merging for REFERENCE model...")
-    ref_model = PeftModel.from_pretrained(base_model_ref, config['model_name_or_path'])
-    ref_model = ref_model.merge_and_unload()
-    print("REFERENCE model prepared and fully loaded into RAM.")
+    # --- [CRITICAL FIX] ---
+    # According to the TRL DPOTrainer documentation and the error message, when training
+    # a new PEFT adapter (i.e., when a `peft_config` is provided), the `ref_model`
+    # argument MUST be `None`. The trainer will automatically create the reference model
+    # from the untuned base model you provide in the `model` argument.
+    # We have already loaded the SFT-tuned model as `model`. The trainer will use this
+    # as the base for the DPO adapter and also as the reference model.
+    print("--> Setting `ref_model` to None as required for PEFT-based DPO training.")
+    ref_model = None
+    # --- [END OF CRITICAL FIX] ---
 
     gc.collect()
 
@@ -3791,7 +3823,7 @@ def run_dpo(config_path: str) -> None:
     print("\n[Trainer Init] Initializing DPOTrainer...")
     dpo_trainer = DPOTrainer(
         model=model,
-        ref_model=ref_model,
+        ref_model=ref_model,  # Pass `None` as required
         args=training_args,
         train_dataset=dataset,
         tokenizer=tokenizer,
@@ -3799,6 +3831,8 @@ def run_dpo(config_path: str) -> None:
         beta=float(config['beta']),
         max_prompt_length=int(config['max_prompt_length']),
         max_length=int(config['max_length']),
+        # [NEW] Add max_target_length for more control
+        max_target_length=int(config.get('max_target_length', config['max_length'] - config['max_prompt_length']))
     )
 
     print("\n--- DPO Training Started ---")
@@ -4226,8 +4260,17 @@ def run_pretrain(config_path: str) -> None:
     print("Tokenizer loaded successfully.")
 
     # 6. Load Dataset and Tokenize
-    dataset_dir = project_root / config['dataset_dir']
+    dataset_dir_str = config['dataset_dir']
+    # Handle both relative and absolute paths
+    dataset_dir = Path(dataset_dir_str)
+    if not dataset_dir.is_absolute():
+        dataset_dir = project_root / dataset_dir_str
+
     print(f"Loading dataset from: {dataset_dir}")
+    # Corrected path handling for dataset
+    if not dataset_dir.exists():
+        raise FileNotFoundError(f"Processed dataset not found at the specified directory: {dataset_dir}")
+
     raw_dataset = load_from_disk(str(dataset_dir))
 
     def tokenize_function(examples):
@@ -4248,6 +4291,8 @@ def run_pretrain(config_path: str) -> None:
     print("Initializing model architecture...")
     model_config_dict['vocab_size'] = tokenizer.vocab_size
     model_config_dict['pad_token_id'] = tokenizer.pad_token_id
+    # Ensure tie_word_embeddings is present in the config for clarity
+    model_config_dict.setdefault('tie_word_embeddings', True)
 
     model_config_obj = BaseLLMConfig(**model_config_dict)
     model = BaseLLM(model_config_obj)
@@ -4296,7 +4341,6 @@ def run_pretrain(config_path: str) -> None:
                     attention_mask=batch['attention_mask'],
                     labels=batch['input_ids']
                 )
-                # **关键**: 从标准的 ModelOutput 对象中获取 loss
                 loss = outputs.loss
 
                 accelerator.backward(loss)
@@ -4320,10 +4364,17 @@ def run_pretrain(config_path: str) -> None:
                     unwrapped_model = accelerator.unwrap_model(model)
 
                     if accelerator.is_main_process:
-                        # 现在模型自身就是一致的，可以直接用默认方式保存
-                        unwrapped_model.save_pretrained(str(output_path))
+                        # +++ START OF FIX +++
+                        # The error suggests using safe_serialization=False for models with tied weights
+                        # when the configuration check fails. This is a direct workaround.
+                        unwrapped_model.save_pretrained(str(output_path), safe_serialization=False)
+                        # +++ END OF FIX +++
                         tokenizer.save_pretrained(str(output_path))
                         print(f"Checkpoint saved at step {completed_steps} to {output_path}")
+
+            # Break the inner loop if max steps reached
+            if completed_steps >= num_training_steps:
+                break
 
     progress_bar.close()
     print("--- Training Finished ---")
@@ -4333,8 +4384,10 @@ def run_pretrain(config_path: str) -> None:
         accelerator.wait_for_everyone()
         unwrapped_model = accelerator.unwrap_model(model)
 
-        # 同样，直接保存即可
-        unwrapped_model.save_pretrained(str(final_model_path))
+        # +++ START OF FIX +++
+        # Apply the same fix for the final model saving.
+        unwrapped_model.save_pretrained(str(final_model_path), safe_serialization=False)
+        # +++ END OF FIX +++
         tokenizer.save_pretrained(str(final_model_path))
         print(f"Final model and tokenizer saved to {final_model_path}")
         if config.get('report_to') == "wandb":
@@ -7689,6 +7742,523 @@ _wandb:
     is_jupyter_run: false
     is_kaggle_kernel: false
     start_time: 1753019455
+    t:
+      1:
+      - 1
+      - 11
+      - 49
+      - 51
+      - 55
+      - 71
+      - 84
+      - 98
+      2:
+      - 1
+      - 11
+      - 49
+      - 51
+      - 55
+      - 71
+      - 84
+      - 98
+      3:
+      - 2
+      - 13
+      - 16
+      - 23
+      4: 3.11.13
+      5: 0.17.0
+      6: 4.41.2
+      8:
+      - 3
+      - 5
+      13: windows-amd64
+
+
+====================
+文件: .\wandb\run-20250723_074919-fnsnfcue\files\config.yaml
+====================
+
+wandb_version: 1
+
+seed:
+  desc: null
+  value: 42
+output_dir:
+  desc: null
+  value: ./checkpoints/pretrain_llm_demo
+save_steps:
+  desc: null
+  value: 1
+logging_steps:
+  desc: null
+  value: 10
+eval_steps:
+  desc: null
+  value: 10
+max_steps:
+  desc: null
+  value: 10
+num_train_epochs:
+  desc: null
+  value: -1
+model_config_path:
+  desc: null
+  value: configs/model/0.5B_dense.yaml
+dataset_dir:
+  desc: null
+  value: ./data/processed/wikitext
+dataset_text_field:
+  desc: null
+  value: text
+max_seq_length:
+  desc: null
+  value: 1024
+optimizer:
+  desc: null
+  value: adamw_torch
+learning_rate:
+  desc: null
+  value: 3e-4
+weight_decay:
+  desc: null
+  value: 0.01
+adam_beta1:
+  desc: null
+  value: 0.9
+adam_beta2:
+  desc: null
+  value: 0.95
+adam_epsilon:
+  desc: null
+  value: 1e-8
+max_grad_norm:
+  desc: null
+  value: 1.0
+lr_scheduler_type:
+  desc: null
+  value: cosine
+warmup_ratio:
+  desc: null
+  value: 0.01
+per_device_train_batch_size:
+  desc: null
+  value: 2
+gradient_accumulation_steps:
+  desc: null
+  value: 16
+mixed_precision:
+  desc: null
+  value: bf16
+deepspeed_config:
+  desc: null
+  value: ''
+use_torch_compile:
+  desc: null
+  value: true
+report_to:
+  desc: null
+  value: wandb
+run_name:
+  desc: null
+  value: pretrain-0.5b-dense-demo
+_wandb:
+  desc: null
+  value:
+    python_version: 3.11.13
+    cli_version: 0.17.0
+    framework: huggingface
+    huggingface_version: 4.41.2
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    start_time: 1753228159
+    t:
+      1:
+      - 1
+      - 11
+      - 49
+      - 51
+      - 55
+      - 71
+      - 84
+      - 98
+      2:
+      - 1
+      - 11
+      - 49
+      - 51
+      - 55
+      - 71
+      - 84
+      - 98
+      3:
+      - 13
+      - 16
+      - 23
+      4: 3.11.13
+      5: 0.17.0
+      6: 4.41.2
+      8:
+      - 3
+      - 5
+      13: windows-amd64
+
+
+====================
+文件: .\wandb\run-20250723_075229-0sbfleey\files\config.yaml
+====================
+
+wandb_version: 1
+
+seed:
+  desc: null
+  value: 42
+output_dir:
+  desc: null
+  value: ./checkpoints/pretrain_llm_demo
+save_steps:
+  desc: null
+  value: 1
+logging_steps:
+  desc: null
+  value: 10
+eval_steps:
+  desc: null
+  value: 10
+max_steps:
+  desc: null
+  value: 10
+num_train_epochs:
+  desc: null
+  value: -1
+model_config_path:
+  desc: null
+  value: configs/model/0.5B_dense.yaml
+dataset_dir:
+  desc: null
+  value: ./data/processed/wikitext
+dataset_text_field:
+  desc: null
+  value: text
+max_seq_length:
+  desc: null
+  value: 1024
+optimizer:
+  desc: null
+  value: adamw_torch
+learning_rate:
+  desc: null
+  value: 3e-4
+weight_decay:
+  desc: null
+  value: 0.01
+adam_beta1:
+  desc: null
+  value: 0.9
+adam_beta2:
+  desc: null
+  value: 0.95
+adam_epsilon:
+  desc: null
+  value: 1e-8
+max_grad_norm:
+  desc: null
+  value: 1.0
+lr_scheduler_type:
+  desc: null
+  value: cosine
+warmup_ratio:
+  desc: null
+  value: 0.01
+per_device_train_batch_size:
+  desc: null
+  value: 2
+gradient_accumulation_steps:
+  desc: null
+  value: 16
+mixed_precision:
+  desc: null
+  value: bf16
+deepspeed_config:
+  desc: null
+  value: ''
+use_torch_compile:
+  desc: null
+  value: true
+report_to:
+  desc: null
+  value: wandb
+run_name:
+  desc: null
+  value: pretrain-0.5b-dense-demo
+_wandb:
+  desc: null
+  value:
+    python_version: 3.11.13
+    cli_version: 0.17.0
+    framework: huggingface
+    huggingface_version: 4.41.2
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    start_time: 1753228349
+    t:
+      1:
+      - 1
+      - 11
+      - 49
+      - 51
+      - 55
+      - 71
+      - 84
+      - 98
+      2:
+      - 1
+      - 11
+      - 49
+      - 51
+      - 55
+      - 71
+      - 84
+      - 98
+      3:
+      - 13
+      - 16
+      - 23
+      4: 3.11.13
+      5: 0.17.0
+      6: 4.41.2
+      8:
+      - 3
+      - 5
+      13: windows-amd64
+
+
+====================
+文件: .\wandb\run-20250723_075417-j6dmdq0c\files\config.yaml
+====================
+
+wandb_version: 1
+
+seed:
+  desc: null
+  value: 42
+output_dir:
+  desc: null
+  value: ./checkpoints/pretrain_llm_demo
+save_steps:
+  desc: null
+  value: 1
+logging_steps:
+  desc: null
+  value: 10
+eval_steps:
+  desc: null
+  value: 10
+max_steps:
+  desc: null
+  value: 10
+num_train_epochs:
+  desc: null
+  value: -1
+model_config_path:
+  desc: null
+  value: configs/model/0.5B_dense.yaml
+dataset_dir:
+  desc: null
+  value: ./data/processed/wikitext
+dataset_text_field:
+  desc: null
+  value: text
+max_seq_length:
+  desc: null
+  value: 1024
+optimizer:
+  desc: null
+  value: adamw_torch
+learning_rate:
+  desc: null
+  value: 3e-4
+weight_decay:
+  desc: null
+  value: 0.01
+adam_beta1:
+  desc: null
+  value: 0.9
+adam_beta2:
+  desc: null
+  value: 0.95
+adam_epsilon:
+  desc: null
+  value: 1e-8
+max_grad_norm:
+  desc: null
+  value: 1.0
+lr_scheduler_type:
+  desc: null
+  value: cosine
+warmup_ratio:
+  desc: null
+  value: 0.01
+per_device_train_batch_size:
+  desc: null
+  value: 2
+gradient_accumulation_steps:
+  desc: null
+  value: 16
+mixed_precision:
+  desc: null
+  value: bf16
+deepspeed_config:
+  desc: null
+  value: ''
+use_torch_compile:
+  desc: null
+  value: true
+report_to:
+  desc: null
+  value: wandb
+run_name:
+  desc: null
+  value: pretrain-0.5b-dense-demo
+_wandb:
+  desc: null
+  value:
+    python_version: 3.11.13
+    cli_version: 0.17.0
+    framework: huggingface
+    huggingface_version: 4.41.2
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    start_time: 1753228457
+    t:
+      1:
+      - 1
+      - 11
+      - 49
+      - 51
+      - 55
+      - 71
+      - 84
+      - 98
+      2:
+      - 1
+      - 11
+      - 49
+      - 51
+      - 55
+      - 71
+      - 84
+      - 98
+      3:
+      - 13
+      - 16
+      - 23
+      4: 3.11.13
+      5: 0.17.0
+      6: 4.41.2
+      8:
+      - 3
+      - 5
+      13: windows-amd64
+
+
+====================
+文件: .\wandb\run-20250723_075607-w5hn6r44\files\config.yaml
+====================
+
+wandb_version: 1
+
+seed:
+  desc: null
+  value: 42
+output_dir:
+  desc: null
+  value: ./checkpoints/pretrain_llm_demo
+save_steps:
+  desc: null
+  value: 1
+logging_steps:
+  desc: null
+  value: 10
+eval_steps:
+  desc: null
+  value: 10
+max_steps:
+  desc: null
+  value: 10
+num_train_epochs:
+  desc: null
+  value: -1
+model_config_path:
+  desc: null
+  value: configs/model/0.5B_dense.yaml
+dataset_dir:
+  desc: null
+  value: ./data/processed/wikitext
+dataset_text_field:
+  desc: null
+  value: text
+max_seq_length:
+  desc: null
+  value: 1024
+optimizer:
+  desc: null
+  value: adamw_torch
+learning_rate:
+  desc: null
+  value: 3e-4
+weight_decay:
+  desc: null
+  value: 0.01
+adam_beta1:
+  desc: null
+  value: 0.9
+adam_beta2:
+  desc: null
+  value: 0.95
+adam_epsilon:
+  desc: null
+  value: 1e-8
+max_grad_norm:
+  desc: null
+  value: 1.0
+lr_scheduler_type:
+  desc: null
+  value: cosine
+warmup_ratio:
+  desc: null
+  value: 0.01
+per_device_train_batch_size:
+  desc: null
+  value: 2
+gradient_accumulation_steps:
+  desc: null
+  value: 16
+mixed_precision:
+  desc: null
+  value: bf16
+deepspeed_config:
+  desc: null
+  value: ''
+use_torch_compile:
+  desc: null
+  value: true
+report_to:
+  desc: null
+  value: wandb
+run_name:
+  desc: null
+  value: pretrain-0.5b-dense-demo
+_wandb:
+  desc: null
+  value:
+    python_version: 3.11.13
+    cli_version: 0.17.0
+    framework: huggingface
+    huggingface_version: 4.41.2
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    start_time: 1753228567
     t:
       1:
       - 1

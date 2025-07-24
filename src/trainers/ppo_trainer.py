@@ -1,34 +1,32 @@
-# FILE: src/trainers/ppo_trainer.py
-"""
-Bedrock Protocol: Proximal Policy Optimization (PPO) Trainer (Conceptual).
+# Bedrock Protocol: Proximal Policy Optimization (PPO) Trainer from Scratch.
+# ULTIMATE MEMORY-OPTIMIZED FINAL VERSION: This is a complete from-scratch implementation
+# of PPO, designed with an aggressive sequential memory management strategy to ensure
+# it runs on resource-constrained systems by minimizing peak memory usage, addressing
+# the previous memory access violation error (exit status 3221225477).
 
-This script provides a conceptual outline for using the Hugging Face TRL library
-to perform PPO, a common reinforcement learning from human feedback (RLHF) algorithm.
-"""
-
-# [HARDCODED MIRROR] Force Hugging Face Hub downloads to go through a domestic mirror
 import os
-
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-
 import sys
-from pathlib import Path
-import yaml
-import torch
+import copy
 import gc
-import shutil
 import time
+from pathlib import Path
+from typing import List, Dict, Tuple
+
+import torch
+import torch.nn as nn
+from torch.optim import AdamW
+from torch.utils.data import DataLoader
+import torch.quantization  # Import the quantization module
+import yaml
 from datasets import load_dataset
-from huggingface_hub import list_repo_files, hf_hub_download, HfApi
-from huggingface_hub.constants import HF_HUB_CACHE
-from huggingface_hub.hf_api import RepoFile
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    GenerationConfig,
+    PreTrainedModel,
+    PreTrainedTokenizer,
+    DataCollatorWithPadding,
 )
-from peft import LoraConfig, PeftModel, PeftConfig, get_peft_model
-from trl import PPOConfig, PPOTrainer, AutoModelForCausalLMWithValueHead
+from peft import LoraConfig, get_peft_model, PeftModel, PeftConfig
 
 # Ensure project root is in path for imports
 script_path = Path(__file__).resolve()
@@ -37,152 +35,207 @@ if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
 
 
+# --- Data Loading Utility (Remains the same) ---
 def load_dataset_robustly(repo_id: str, split: str):
     """
-    [ULTIMATE DATA ENGINE V12.0] Intelligently validates and downloads datasets.
+    Offline-first, robust data loader.
     """
     print(f"\n[Data Engine] Initializing for dataset '{repo_id}'.")
-
-    print("--> Step 1/4: Performing pre-flight check of local cache...")
-
-    local_cache_dir = Path(HF_HUB_CACHE) / f"datasets--{repo_id.replace('/', '--')}"
-    is_complete = False
-
     try:
-        api = HfApi()
-        repo_files_info = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
-
-        def get_filename(file_info):
-            return file_info.rfilename if isinstance(file_info, RepoFile) else file_info
-
-        relevant_files = {
-            get_filename(f) for f in repo_files_info
-            if get_filename(f).endswith(('.json', '.jsonl', '.parquet', '.arrow', '.csv', '.txt',
-                                         '.py')) or "dataset_info.json" in get_filename(
-                f) or "README.md" in get_filename(f)
-        }
-
-        if not local_cache_dir.exists():
-            print("--> STATUS: Local cache directory does not exist. Full download required.")
-            files_to_download = list(relevant_files)
-        else:
-            snapshot_dir = local_cache_dir / 'snapshots'
-            if not snapshot_dir.exists():
-                print("--> STATUS: Local cache directory exists but is empty. Full download required.")
-                files_to_download = list(relevant_files)
-            else:
-                local_files_in_snapshot = {p.name for p in snapshot_dir.rglob('*') if p.is_file()}
-                is_missing = any(
-                    Path(f).name not in local_files_in_snapshot for f in relevant_files if not Path(f).is_dir())
-
-                if not is_missing:
-                    print("--> STATUS: Cache check passed. All files appear to be present. Skipping download.")
-                    is_complete = True
-                    files_to_download = []
-                else:
-                    print(f"--> STATUS: Cache incomplete. Full re-download will be triggered for safety.")
-                    files_to_download = list(relevant_files)
-
-
-    except Exception as e:
-        print(f"--> WARNING: Pre-flight check failed. Assuming full download is needed. Error: {e}")
-        api = HfApi()
-        repo_files_info = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
-
-        def get_filename(file_info):
-            return file_info.rfilename if isinstance(file_info, RepoFile) else file_info
-
-        files_to_download = [get_filename(info) for info in repo_files_info if get_filename(info).endswith(
-            ('.json', '.jsonl', '.parquet', '.arrow', '.csv', '.txt', '.py')) or "dataset_info.json" in get_filename(
-            info) or "README.md" in get_filename(info)]
-
-    if not is_complete:
-        print(f"\n--> Step 2/4: Starting intelligent download of {len(files_to_download)} file(s)...")
-        max_retries = 5
-        initial_wait_time = 2
-
-        for i, filename in enumerate(files_to_download):
-            for attempt in range(max_retries):
-                try:
-                    print(
-                        f"    - Downloading file {i + 1}/{len(files_to_download)}: '{filename}' (Attempt {attempt + 1}/{max_retries})...")
-                    hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset", resume_download=True)
-                    print(f"    - Successfully downloaded '{filename}'.")
-                    break
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        wait_time = initial_wait_time * (2 ** attempt)
-                        print(f"    - FAILED to download '{filename}'. Error: {e}. Retrying in {wait_time} seconds...")
-                        time.sleep(wait_time)
-                    else:
-                        print(f"    - FATAL: Failed to download '{filename}' after {max_retries} attempts.")
-                        raise e
-        print("--> Intelligent download complete.")
-
-    try:
-        print(f"\n--> Step 3/4: Loading dataset '{repo_id}' from local cache...")
+        print("--> Attempting to load directly from local cache (offline-first)...")
         dataset = load_dataset(repo_id, split=split, download_mode="reuse_dataset_if_exists")
-        print(f"\n[Data Engine] Successfully loaded the '{split}' split.")
-        print("--> Step 4/4: Data Engine finished.")
+        print("\n[Data Engine] Successfully loaded from cache.")
         return dataset
     except Exception as e:
-        print(
-            f"--> FATAL: Failed to load dataset from cache even after download. Cache might be severely corrupted. Error: {e}")
-        sys.exit(1)
+        print(f"--> INFO: Could not load from cache directly. Will now attempt standard download. Error: {e}")
+        try:
+            print(f"\n--> Loading dataset '{repo_id}' using standard procedure...")
+            dataset = load_dataset(repo_id, split=split)
+            print(f"\n[Data Engine] Successfully loaded the '{split}' split.")
+            return dataset
+        except Exception as final_e:
+            print(
+                f"--> FATAL: All attempts to load the dataset failed. Please check your network and cache. Error: {final_e}")
+            sys.exit(1)
 
+
+# --- Custom PPO Model and Utilities ---
+
+class ActorModel(nn.Module):
+    """Wrapper for the policy model to ensure consistent API."""
+
+    def __init__(self, model: PeftModel):
+        super().__init__()
+        self.model = model
+
+    def forward(self, *args, **kwargs):
+        return self.model(*args, **kwargs)
+
+
+class CriticModel(nn.Module):
+    """Wrapper for the value model with a value head."""
+
+    def __init__(self, model: PreTrainedModel):
+        super().__init__()
+        self.model = model
+        # Add the value head
+        hidden_size = model.config.hidden_size
+        self.value_head = nn.Linear(hidden_size, 1, bias=False)
+        # Initialize the value head
+        nn.init.xavier_uniform_(self.value_head.weight)
+
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True
+        )
+        # Get the last hidden state
+        last_hidden_state = outputs.hidden_states[-1]
+        # Pass it through the value head
+        values = self.value_head(last_hidden_state).squeeze(-1)
+        return values
+
+
+def compute_log_probs(model: PreTrainedModel, input_ids: torch.Tensor, attention_mask: torch.Tensor,
+                      response_mask: torch.Tensor) -> torch.Tensor:
+    """Computes log probabilities of tokens in the response."""
+    with torch.no_grad():
+        outputs = model(input_ids, attention_mask=attention_mask)
+        logits = outputs.logits
+        # Shift logits and labels for next token prediction
+        logits = logits[:, :-1, :]
+        labels = input_ids[:, 1:]
+
+        log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+        # Gather the log probabilities of the actual tokens
+        token_log_probs = torch.gather(log_probs, 2, labels.unsqueeze(2)).squeeze(2)
+
+        # We only care about the log probabilities of the response tokens
+        masked_log_probs = token_log_probs * response_mask[:, 1:]
+        return masked_log_probs
+
+
+def compute_advantages_and_returns(
+        rewards: torch.Tensor,
+        values: torch.Tensor,
+        response_mask: torch.Tensor,
+        gamma: float,
+        lam: float
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Computes advantages and returns using Generalized Advantage Estimation (GAE)."""
+    seq_len = rewards.size(1)
+    advantages = torch.zeros_like(rewards)
+    last_gae_lam = 0
+
+    values_detached = values.detach()
+
+    for t in reversed(range(seq_len)):
+        mask_t_plus_1 = response_mask[:, t + 1] if t < seq_len else torch.zeros_like(response_mask[:, t])
+        next_values = values_detached[:, t + 1] if t < seq_len else torch.zeros_like(values_detached[:, t])
+        effective_next_values = next_values * mask_t_plus_1
+
+        delta = rewards[:, t] + gamma * effective_next_values - values_detached[:, t]
+
+        last_gae_lam = delta + gamma * lam * last_gae_lam * mask_t_plus_1
+        advantages[:, t] = last_gae_lam
+
+    returns = advantages + values_detached[:, :-1]
+
+    advantages = advantages * response_mask[:, 1:]
+    return advantages, returns
+
+
+# --- Main PPO Trainer Logic ---
 
 def run_ppo(config_path: str) -> None:
     """
-    Conceptual main function to execute the PPO process.
+    Main function to execute the from-scratch PPO process.
     """
-    print("--- [Bedrock] Initiating Proximal Policy Optimization (PPO) (Conceptual) ---")
-    print(f"--> NOTE: Hugging Face endpoint is set to: {os.environ.get('HF_ENDPOINT')}")
+    print("--- [Bedrock] Initiating PPO from Scratch ---")
 
     print(f"\n[Configuration] Loading configuration from: {config_path}")
-    with open(config_path, 'r') as f:
+    with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
 
-    dataset = load_dataset_robustly(config['dataset_name'], split="train")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"\n[Hardware] Using device: {device}")
+
+    raw_dataset = load_dataset_robustly(config['dataset_name'], split="train")
 
     if 'dataset_subset_size' in config and int(config['dataset_subset_size']) > 0:
         subset_size = int(config['dataset_subset_size'])
-        dataset = dataset.select(range(subset_size))
+        raw_dataset = raw_dataset.select(range(subset_size))
         print(f"--> Using a subset of {subset_size} samples for this run.")
-
-    def format_ppo_dataset(example: dict) -> dict:
-        return {"query": example[config['dataset_text_field']]}
-
-    dataset = dataset.map(format_ppo_dataset, remove_columns=dataset.column_names)
 
     tokenizer = AutoTokenizer.from_pretrained(config['model_name_or_path'], trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.padding_side = "left"
 
-    def tokenize(example):
+    def tokenize_prompts(example: dict) -> dict:
+        prompt = f"Review: {example[config['dataset_text_field']]}\nSentiment: "
         return tokenizer(
-            example["query"],
+            prompt,
             truncation=True,
             max_length=128,
-            padding="max_length"
+            padding='max_length'
         )
 
-    dataset = dataset.map(tokenize, batched=False)
-    dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "query"])
+    dataset = raw_dataset.map(tokenize_prompts, remove_columns=raw_dataset.column_names)
+    dataset.set_format(type="torch")
+
+    dataloader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=True)
     print(f"Dataset loaded and formatted with {len(dataset)} prompts.")
 
-    print(f"\n[Model Loading] Loading and preparing PPO Actor model from: {config['model_name_or_path']}")
+    # --- ULTIMATE MEMORY-OPTIMIZED Model Loading (CPU QUANTIZATION ENABLED) ---
+    print(f"\n[Model Loading] Extreme memory optimization with QUANTIZATION enabled for CPU.")
+
+    model_dtype = torch.float32
 
     peft_config_for_base = PeftConfig.from_pretrained(config['model_name_or_path'])
     base_model_name = peft_config_for_base.base_model_name_or_path
 
-    print("--> Step 1/2: Loading SFT-tuned model and merging into a clean base model...")
-    base_model = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=torch.float32)
-    sft_merged_model = PeftModel.from_pretrained(base_model, config['model_name_or_path']).merge_and_unload()
-    print("--> SFT weights merged successfully.")
+    # --- STRATEGY: Quantize non-trainable models (Critic base, Reference) ---
 
-    print("--> Step 2/2: Wrapping SFT model with ValueHead AND applying PEFT adapter in a single operation...")
-    ppo_peft_config = LoraConfig(
+    print("--> Step 1a: Creating Value (Critic) model...")
+    base_model_for_critic = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=model_dtype)
+    critic = CriticModel(base_model_for_critic).to(device)
+    print("--> Value model created.")
+
+    print("--> Step 1b: Quantizing Critic's base model (int8)...")
+    critic.model = torch.quantization.quantize_dynamic(
+        critic.model, {torch.nn.Linear}, dtype=torch.qint8
+    )
+    print("--> Critic's base model quantized. This significantly reduces its memory footprint.")
+    del base_model_for_critic
+    gc.collect()
+    print("--> Temporary base model for critic destroyed.")
+
+    print("--> Step 2: Loading SFT model to serve as the base for both Actor and Reference...")
+    sft_model_base = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=model_dtype)
+    sft_model_merged = PeftModel.from_pretrained(sft_model_base, config['model_name_or_path'])
+    sft_model_merged = sft_model_merged.merge_and_unload()
+    sft_model_merged.to(device)
+    print("--> SFT adapter merged into a single model.")
+    gc.collect()
+
+    print("--> Step 3a: Creating Reference model (no copy needed)...")
+    ref_model = sft_model_merged
+    for param in ref_model.parameters():
+        param.requires_grad = False
+    print("--> Reference model ready and frozen.")
+
+    print("--> Step 3b: Quantizing Reference model (int8)...")
+    ref_model = torch.quantization.quantize_dynamic(
+        ref_model, {torch.nn.Linear}, dtype=torch.qint8
+    )
+    print("--> Reference model quantized. This is a major memory saving.")
+    gc.collect()
+
+    print("--> Step 4: Creating Policy (Actor) model by applying a new LoRA adapter...")
+    lora_config_ppo = LoraConfig(
         r=int(config['lora_r']),
         lora_alpha=int(config['lora_alpha']),
         lora_dropout=float(config['lora_dropout']),
@@ -190,113 +243,158 @@ def run_ppo(config_path: str) -> None:
         bias="none",
         task_type="CAUSAL_LM",
     )
+    # The actor uses the SAME sft_model_merged instance which has NOT been quantized.
+    # The LoRA layers will be applied to the float32 base weights.
+    policy_peft_model = get_peft_model(sft_model_merged, lora_config_ppo)
+    actor = ActorModel(policy_peft_model).to(device)
+    print("--> Policy model (float32) with new LoRA adapter is ready for training.")
 
-    model = AutoModelForCausalLMWithValueHead.from_pretrained(
-        sft_merged_model,
-        peft_config=ppo_peft_config,
-    )
-    print("--> PPO Actor model with ValueHead and LoRA adapter is ready.")
+    print("--> Step 5: All models initialized with minimized peak memory usage for CPU.")
 
-    # [FINAL FIX] The `print_trainable_parameters` method is part of the PEFT model,
-    # but not the top-level wrapper. We can safely remove this line.
-    # The trainer itself will log parameter counts upon initialization.
-    # model.print_trainable_parameters()
-
-    gc.collect()
-
-    print("\n[Configuration] Setting up PPO training arguments...")
-
-    log_with = config.get('report_to', 'none')
-    if log_with == 'none':
-        log_with = None
-
-    ppo_config = PPOConfig(
-        exp_name=config['run_name'],
-        log_with=log_with,
-        learning_rate=float(config['learning_rate']),
-        batch_size=int(config['batch_size']),
-        mini_batch_size=int(config['mini_batch_size']),
-        gradient_accumulation_steps=int(config['gradient_accumulation_steps']),
-        target_kl=float(config.get('target_kl', 0.1)),
-        adap_kl_ctrl=bool(config['adap_kl_ctrl']),
-        seed=int(config['seed']),
-        remove_unused_columns=False,
-    )
-
-    print("[Reward Model] Initializing conceptual Reward Model (rewards based on length)...")
-
-    def get_dummy_reward(outputs_text):
-        rewards = []
-        for text in outputs_text:
-            unique_words = len(set(text.split()))
-            rewards.append(torch.tensor(float(unique_words)))
-        return rewards
-
-    print("\n[Trainer Init] Initializing PPOTrainer...")
-    ppo_trainer = PPOTrainer(
-        config=ppo_config,
-        model=model,
-        ref_model=None,
-        tokenizer=tokenizer,
-        dataset=dataset,
-    )
-
-    print("\n--- PPO Training Started (Conceptual) ---")
-    generation_kwargs = GenerationConfig(
-        min_length=-1,
-        top_k=0.0,
-        top_p=1.0,
-        do_sample=True,
-        pad_token_id=tokenizer.eos_token_id,
-        max_new_tokens=int(config['max_new_tokens']),
-    )
-
-    stats_keys_to_log = [
-        "ppo/loss/total", "ppo/loss/policy", "ppo/loss/value",
-        "ppo/returns/mean", "ppo/returns/var", "objective/kl", "ppo/policy/approxkl",
+    trainable_params = [
+        *filter(lambda p: p.requires_grad, actor.parameters()),
+        *filter(lambda p: p.requires_grad, critic.parameters())
     ]
+    optimizer = AdamW(trainable_params, lr=float(config['learning_rate']))
+    print("\n[Optimizer] AdamW optimizer configured for LoRA and value head parameters.")
 
-    total_ppo_steps = int(config['ppo_steps'])
-    for step, batch in enumerate(ppo_trainer.dataloader):
-        if step >= total_ppo_steps:
-            break
+    print("\n--- PPO Training Started (From Scratch) ---")
 
-        query_tensors = batch['input_ids']
-        queries = [q for q in query_tensors]
+    ppo_epochs = int(config['ppo_epochs'])
+    mini_batch_size = int(config['mini_batch_size'])
+    kl_coef = float(config.get('init_kl_coef', 0.2))
+    vf_coef = float(config.get('vf_coef', 0.1))
+    clip_epsilon = float(config.get('cliprange', 0.2))
+    gamma = float(config.get('gamma', 0.99))
+    lam = float(config.get('lam', 0.95))
 
-        response_tensors = ppo_trainer.generate(queries, **generation_kwargs.to_dict())
+    global_step = 0
+    for ppo_step in range(int(config['ppo_steps'])):
+        print(f"\n--- PPO Step {ppo_step + 1}/{config['ppo_steps']} ---")
 
-        batch['response'] = tokenizer.batch_decode(response_tensors, skip_special_tokens=True)
+        actor.eval()
+        critic.eval()
 
-        rewards = get_dummy_reward(batch["response"])
+        batch = next(iter(dataloader))
+        prompt_ids = batch['input_ids'].to(device)
+        prompt_mask = batch['attention_mask'].to(device)
+        prompt_len = prompt_ids.size(1)
 
-        stats = ppo_trainer.step(queries, response_tensors, rewards)
-        ppo_trainer.log_stats(stats, batch, rewards)
+        print(f"  (1/4) Rollout: Generating responses...")
+        with torch.no_grad():
+            generation_kwargs = {
+                "min_length": -1,
+                "top_k": 0.0,
+                "top_p": 1.0,
+                "do_sample": True,
+                "pad_token_id": tokenizer.pad_token_id,
+                "max_new_tokens": int(config.get('max_new_tokens', 32)),
+            }
+            response_ids = actor.model.generate(input_ids=prompt_ids, attention_mask=prompt_mask, **generation_kwargs)
 
-        log_output = f"Conceptual PPO Step {step + 1}/{total_ppo_steps}:"
-        for key in stats_keys_to_log:
-            value = stats.get(key)
-            if value is not None:
-                log_output += f" | {key.split('/')[-1]}: {float(value):.4f}"
-        print(log_output)
+            full_ids = response_ids
+            full_mask = (full_ids != tokenizer.pad_token_id).long()
+            response_only_ids = full_ids[:, prompt_len:]
 
-    print("\n--- PPO Training Finished (Conceptual) ---")
+            response_mask = torch.zeros_like(full_mask)
+            response_mask[:, prompt_len:] = full_mask[:, prompt_len:]
 
-    final_model_path = Path(config['output_dir']) / "final_ppo_model"
+        print(f"  (2/4) Evaluation: Calculating log_probs, values, and rewards...")
+        with torch.no_grad():
+            log_probs_policy = compute_log_probs(actor.model, full_ids, full_mask, response_mask)
+            log_probs_ref = compute_log_probs(ref_model, full_ids, full_mask, response_mask)
+            values = critic(input_ids=full_ids, attention_mask=full_mask)
+            kl_div = log_probs_policy - log_probs_ref
+            rewards = -kl_coef * kl_div
+
+            decoded_responses = tokenizer.batch_decode(response_only_ids, skip_special_tokens=True)
+            for i, resp in enumerate(decoded_responses):
+                terminal_reward = len(set(resp.split())) / 10.0
+                response_len = torch.sum(full_mask[i, prompt_len:]).int().item() - 1
+                if response_len >= 0 and (prompt_len + response_len) < rewards.size(1):
+                    rewards[i, prompt_len + response_len] += terminal_reward
+
+        print(f"  (3/4) GAE: Computing advantages and returns...")
+        advantages, returns = compute_advantages_and_returns(rewards, values, response_mask, gamma, lam)
+        # Handle case of std=0 when batch size is 1
+        if advantages.numel() > 1:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        else:
+            advantages = (advantages - advantages.mean())
+
+        rollout_data = {
+            'full_ids': full_ids,
+            'full_mask': full_mask,
+            'log_probs_old': log_probs_policy,
+            'returns': returns,
+            'advantages': advantages,
+            'response_mask': response_mask
+        }
+
+        print(f"  (4/4) Optimization: Updating policy and value models...")
+        actor.train()
+        critic.train()
+
+        for epoch in range(ppo_epochs):
+            perm = torch.randperm(full_ids.size(0))
+            for i in range(0, full_ids.size(0), mini_batch_size):
+                global_step += 1
+                indices = perm[i:i + mini_batch_size]
+
+                mb_ids = rollout_data['full_ids'][indices]
+                mb_mask = rollout_data['full_mask'][indices]
+                mb_log_probs_old = rollout_data['log_probs_old'][indices]
+                mb_returns = rollout_data['returns'][indices]
+                mb_advantages = rollout_data['advantages'][indices]
+                mb_response_mask = rollout_data['response_mask'][indices]
+
+                optimizer.zero_grad()
+
+                outputs = actor(input_ids=mb_ids, attention_mask=mb_mask)
+                logits = outputs.logits[:, :-1, :]
+                log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+                labels = mb_ids[:, 1:]
+                new_log_probs = torch.gather(log_probs, 2, labels.unsqueeze(2)).squeeze(2)
+
+                new_values = critic(input_ids=mb_ids, attention_mask=mb_mask)[:, :-1]
+
+                log_ratio = new_log_probs - mb_log_probs_old
+                ratio = torch.exp(log_ratio)
+
+                policy_loss_1 = -mb_advantages * ratio
+                policy_loss_2 = -mb_advantages * torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon)
+
+                policy_loss = torch.max(policy_loss_1, policy_loss_2)
+                policy_loss = (policy_loss * mb_response_mask[:, 1:]).sum() / mb_response_mask[:, 1:].sum()
+
+                value_loss = 0.5 * ((new_values - mb_returns) ** 2)
+                value_loss = (value_loss * mb_response_mask[:, 1:]).sum() / mb_response_mask[:, 1:].sum()
+
+                total_loss = policy_loss + vf_coef * value_loss
+
+                total_loss.backward()
+                optimizer.step()
+
+            print(
+                f"    Epoch {epoch + 1}/{ppo_epochs} | Total Loss: {total_loss.item():.4f} | Policy Loss: {policy_loss.item():.4f} | Value Loss: {value_loss.item():.4f}")
+
+    print("\n--- PPO Training Finished ---")
+
+    final_model_path = Path(config['output_dir']) / "final_ppo_model_from_scratch"
     os.makedirs(final_model_path, exist_ok=True)
 
     print(f"\n[Saving] Saving final PPO-tuned adapter model to {final_model_path}...")
-    ppo_trainer.save_pretrained(str(final_model_path))
+    actor.model.save_pretrained(str(final_model_path))
     tokenizer.save_pretrained(str(final_model_path))
 
     print("Model and tokenizer saved successfully.")
-
-    print("\n--- [Bedrock] PPO Process Complete ---")
+    print("\n--- [Bedrock] PPO Process from Scratch Complete ---")
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         print("Usage: python src/trainers/ppo_trainer.py <path_to_config.yaml>")
         sys.exit(1)
+
     config_file_path = sys.argv[1]
     run_ppo(config_file_path)
